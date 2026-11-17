@@ -1,0 +1,413 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<script type="importmap">
+  { "imports": { "three": "./three/build/three.module.js", "three/addons/": "./three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const W = 1800, H = 1150, N = 32, DEG = Math.PI / 180;
+
+// ---------------------------------------------------------------- the map
+const grid = Array.from({ length: N }, () => Array(N).fill('g'));
+const rect = (x0, z0, x1, z1, c) => { for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) grid[z][x] = c; };
+const set = (x, z, c) => { grid[z][x] = c; };
+const hline = (z, x0, x1, c) => rect(x0, z, x1, z, c);
+const vline = (x, z0, z1, c) => rect(x, z0, x, z1, c);
+
+// Land use
+rect(0, 0, 31, 1, '~');                      // river
+rect(0, 2, 31, 2, 't');                      // riverside trees
+set(1, 2, 'W'); set(2, 2, 'W');              // water works
+rect(20, 2, 29, 2, 'k');                     // port
+rect(0, 4, 8, 8, 'h'); set(1, 8, 'C');       // north-west houses, a phone mast
+rect(10, 4, 20, 4, 'c');                     // mixed-use frontage on River St
+rect(10, 5, 20, 7, 'h'); set(12, 7, 'p');    // older houses north of downtown, a pocket park
+rect(10, 8, 20, 8, 'a');                     // flats facing the downtown loop
+rect(22, 4, 31, 8, 'i');                     // industry along the river
+set(28, 5, 'E'); set(29, 5, 'E'); set(28, 6, 'E'); set(29, 6, 'E');   // power station
+rect(10, 10, 20, 20, 'c');                   // downtown
+rect(18, 16, 20, 20, 'o'); rect(16, 19, 17, 20, 'o');                // office towers
+rect(14, 14, 16, 16, 'q'); set(15, 15, 'Q'); // the square, fountain in the middle
+set(14, 18, 'T'); set(18, 14, 'B');          // town hall and bank face the square
+rect(0, 10, 8, 26, 'h'); set(6, 20, 'S'); set(2, 17, 'p');           // west neighbourhood, school, pocket park
+rect(22, 10, 25, 26, 'a'); rect(27, 10, 31, 26, 'h'); set(29, 17, 'p'); // east: flats near downtown, then houses
+rect(22, 21, 25, 23, 'n');                   // Chinatown
+set(22, 11, 'X'); set(23, 16, 'H'); set(25, 16, 'D'); set(22, 20, 'O');
+for (const [x, z] of [[5, 11], [5, 20], [27, 11], [27, 20]]) set(x, z, 'c');  // corner shops
+rect(10, 22, 14, 25, 'a');
+rect(16, 22, 20, 25, 'p');                   // the big park
+rect(0, 26, 31, 26, 's'); rect(0, 28, 31, 28, 's');                  // the strip
+set(6, 28, 'm'); set(20, 28, 'm'); set(7, 28, 'P'); set(21, 28, 'P'); set(12, 26, 'P'); set(25, 28, 'P');
+rect(0, 29, 31, 31, 't'); set(29, 30, 'C');  // woods, a second mast
+
+// Local streets first, then main roads over them, so crossings become main-road junctions
+vline(13, 13, 17, 'R'); vline(17, 13, 17, 'R'); hline(13, 13, 17, 'R'); hline(17, 13, 17, 'R');   // ring round the square
+vline(9, 9, 21, 'R'); vline(21, 9, 26, 'R'); hline(9, 9, 21, 'R'); hline(21, 9, 21, 'R');         // downtown loop
+vline(4, 4, 26, 'R'); hline(12, 0, 8, 'R'); hline(19, 0, 8, 'R'); hline(24, 0, 14, 'R');         // west streets
+vline(26, 4, 26, 'R'); hline(12, 22, 31, 'R'); hline(19, 22, 31, 'R'); hline(24, 22, 31, 'R');   // east streets
+hline(6, 5, 25, 'R');                        // a street through the north side
+hline(3, 0, 31, 'M');                        // River St
+vline(15, 3, 12, 'M'); vline(15, 18, 31, 'M');   // Broad St, into the square from north and south
+hline(15, 0, 12, 'M'); hline(15, 18, 31, 'M');   // Main St, into the square from west and east
+hline(27, 0, 31, 'M');                       // the highway
+
+const at = (x, z) => (x < 0 || z < 0 || x >= N || z >= N) ? null : grid[z][x];
+const isRoad = (c) => c === 'R' || c === 'M';
+const downtown = (x, z) => x >= 10 && x <= 20 && z >= 10 && z <= 20;
+
+// ---------------------------------------------------------------- road pieces
+// Arms at rotation 0: top = -z, right = +x, bottom = +z, left = -x. R = local road, M = main road.
+const PIECES = [
+  ['tile-road-straight', { T: 'R', B: 'R' }], ['tile-road-curve', { R: 'R', B: 'R' }],
+  ['tile-road-intersection-t', { L: 'R', R: 'R', B: 'R' }], ['tile-road-intersection', { T: 'R', R: 'R', B: 'R', L: 'R' }],
+  ['tile-road-end', { B: 'R' }],
+  ['tile-mainroad-straight', { T: 'M', B: 'M' }], ['tile-mainroad-curve', { R: 'M', B: 'M' }],
+  ['tile-mainroad-intersection-t', { L: 'M', R: 'M', B: 'M' }], ['tile-mainroad-intersection', { T: 'M', R: 'M', B: 'M', L: 'M' }],
+  ['tile-mainroad-road-intersection', { T: 'M', B: 'M', L: 'R', R: 'R' }],
+  ['tile-road-mainroad-intersection-t', { L: 'M', R: 'M', B: 'R' }],
+  ['tile-mainroad-road-intersection-t', { L: 'R', R: 'R', B: 'M' }],
+  ['tile-roads-mainroad-intersection', { T: 'M', L: 'R', R: 'R', B: 'R' }],
+];
+const TURN = { B: 'R', R: 'T', T: 'L', L: 'B' };   // where each arm ends up after +90° about y
+const rotateArms = (arms, turns) => {
+  let a = { ...arms };
+  for (let i = 0; i < turns; i++) { const n = {}; for (const [d, c] of Object.entries(a)) n[TURN[d]] = c; a = n; }
+  return a;
+};
+const sameArms = (a, b) => ['T', 'R', 'B', 'L'].every((d) => (a[d] ?? null) === (b[d] ?? null));
+const DIRS = { T: [0, -1], R: [1, 0], B: [0, 1], L: [-1, 0] };
+const OPP = { T: 'B', B: 'T', L: 'R', R: 'L' };
+
+function roadPiece(x, z) {
+  const self = at(x, z), arms = {};
+  for (const [d, [dx, dz]] of Object.entries(DIRS)) {
+    let n = at(x + dx, z + dz);
+    // A road on the map edge carries on off the map if it runs inward
+    if (n === null) { const [ox, oz] = DIRS[OPP[d]]; if (isRoad(at(x + ox, z + oz))) n = self; }
+    if (isRoad(n)) arms[d] = n;
+  }
+  const count = Object.keys(arms).length;
+  // Straights, curves and ends are drawn in the tile's own class; junctions take each arm's class from its neighbour
+  const want = count <= 2 ? Object.fromEntries(Object.keys(arms).map((d) => [d, self])) : arms;
+  const tryMatch = (target) => {
+    for (const [name, base] of PIECES) for (let t = 0; t < 4; t++) if (sameArms(rotateArms(base, t), target)) return { name, rot: t * 90, arms };
+    return null;
+  };
+  return tryMatch(want) ?? tryMatch(Object.fromEntries(Object.keys(arms).map((d) => [d, self]))) ?? { name: 'tile-road-intersection', rot: 0, arms };
+}
+
+// ---------------------------------------------------------------- assets
+const tex = new THREE.TextureLoader();
+const base = tex.load('textures/base.png'); base.colorSpace = THREE.SRGBColorSpace; base.flipY = false;
+const spec = tex.load('textures/specular.png'); spec.colorSpace = THREE.SRGBColorSpace; spec.flipY = false;
+await new Promise((r) => { const check = () => base.image ? r() : setTimeout(check, 50); check(); });
+const materials = {};
+const materialFor = (tint = 0xffffff) => materials[tint] ??= new THREE.MeshLambertMaterial({ map: base, specularMap: spec, color: tint });
+const loader = new GLTFLoader();
+const cache = {};
+async function model(name) {
+  cache[name] ??= await new Promise((res, rej) => loader.load(`models/${name}.glb`, (g) => res(g.scene), undefined, rej));
+  return cache[name].clone();
+}
+const city = new THREE.Group();
+
+// A model, rotated and scaled, with its bounding box measured at the origin
+async function prep(name, rot = 0, { scale = [1, 1, 1], tint, shadow = true } = {}) {
+  const m = await model(name);
+  m.traverse((o) => { if (o.isMesh) { o.material = materialFor(tint); o.castShadow = shadow; o.receiveShadow = true; } });
+  m.scale.set(scale[0] / 30, scale[1] / 30, scale[2] / 30);
+  m.rotation.y = rot * DEG;
+  const box = new THREE.Box3().setFromObject(m);
+  return { m, box, size: box.getSize(new THREE.Vector3()) };
+}
+// Centre a prepared model on (cx, cz), resting on y = lift (or with its top at y = lift for ground tiles)
+function put({ m, box }, cx, cz, lift = 0, ground = false) {
+  const c = box.getCenter(new THREE.Vector3());
+  m.position.set(cx - c.x, (ground ? -box.max.y : -box.min.y) + lift, cz - c.z);
+  city.add(m);
+}
+async function place(name, x, z, { rot = 0, dx = 0, dz = 0, ground = false, shadow = true, scale, lift = 0, tint } = {}) {
+  put(await prep(name, rot, { scale, tint, shadow }), x + dx, z + dz, lift, ground);
+}
+
+let seed = 11;
+const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+const pick = (list) => list[Math.floor(rand() * list.length)];
+const shuffle = (list) => list.map((v) => [rand(), v]).sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+
+// Facing: towards the nearest road in a straight line; ties go to the sides the camera sees
+const FACE = { B: 0, R: 90, T: 180, L: 270 };
+function facing(x, z) {
+  let best = null;
+  for (const d of ['T', 'L', 'B', 'R']) {
+    const [dx, dz] = DIRS[d];
+    for (let k = 1; k <= 4; k++) if (isRoad(at(x + dx * k, z + dz * k))) { if (!best || k < best.k) best = { d, k }; break; }
+  }
+  return best ?? { d: 'T', k: 9 };
+}
+const roadSides = (x, z) => Object.keys(DIRS).filter((d) => isRoad(at(x + DIRS[d][0], z + DIRS[d][1])));
+
+const PAVEMENT = 0xa9a9a9, WARM = 0xffe7c7, LOT = 0.86, KERB = 0.03, EDGE = LOT / 2;
+
+// A row of buildings side by side along the street edge of a lot, fronts at the pavement
+async function row(x, z, d, names, { setback = 0.03, gap = 0.025, back = false } = {}) {
+  const alongX = d === 'T' || d === 'B';
+  const items = [];
+  let total = 0;
+  for (const name of names) {
+    const it = await prep(name, FACE[d]);
+    const w = alongX ? it.size.x : it.size.z;
+    const extra = items.length ? gap : 0;
+    if (items.length && total + extra + w > LOT - 0.05) continue;
+    total += extra + w;
+    items.push({ ...it, w, depth: alongX ? it.size.z : it.size.x });
+  }
+  const [fx, fz] = DIRS[d];
+  let s = -total / 2;
+  for (const it of items) {
+    const along = s + it.w / 2;
+    const perp = (EDGE - setback - it.depth / 2) * (back ? -1 : 1);
+    put(it, x + (alongX ? along : 0) + fx * perp, z + (alongX ? 0 : along) + fz * perp, KERB);
+    s += it.w + gap;
+  }
+  return items;
+}
+// A corner building pushed into the corner where its two streets meet
+const CORNER_ROT = { 'B,R': 0, 'R,T': 90, 'L,T': 180, 'B,L': 270 };
+async function corner(x, z, sides, names) {
+  const pair = sides.filter((d) => d !== OPP[sides[0]]).slice(0, 2).sort().join(',');
+  const it = await prep(pick(names), CORNER_ROT[pair] ?? 0);
+  let cx = x, cz = z;
+  for (const d of pair.split(',')) {
+    const [dx, dz] = DIRS[d];
+    cx += dx * (EDGE - 0.03 - it.size.x / 2) * Math.abs(dx);
+    cz += dz * (EDGE - 0.03 - it.size.z / 2) * Math.abs(dz);
+  }
+  put(it, cx, cz, KERB);
+}
+
+async function lot(x, z, surface, tint) {
+  await place('tile-plain_concrete', x, z, { ground: true, shadow: false, tint: PAVEMENT });
+  await place(surface, x, z, { ground: true, shadow: false, tint, scale: [LOT, 1, LOT], lift: KERB });
+}
+const TREES = ['tree-oak', 'tree-lime', 'tree-round', 'tree-birch', 'tree-elipse', 'tree-beech'];
+async function trees(x, z, n, list = TREES, lift = 0, spread = 0.7) {
+  for (let i = 0; i < n; i++) await place(pick(list), x, z, { dx: (rand() - 0.5) * spread, dz: (rand() - 0.5) * spread, lift });
+}
+// Trees in the half of the lot away from the street
+async function backGarden(x, z, d, n) {
+  const [fx, fz] = DIRS[d];
+  for (let i = 0; i < n; i++) {
+    const along = (rand() - 0.5) * 0.7, perp = -(0.12 + rand() * 0.25);
+    await place(pick(TREES), x, z, { dx: fx ? fx * perp : along, dz: fz ? fz * perp : along, lift: KERB });
+  }
+}
+const CARS = ['car-passenger', 'car-taxi', 'car-hippie-van', 'car-veteran', 'car-passenger-race', 'truck', 'car-police'];
+async function parking(x, z) {
+  await lot(x, z, 'tile-plain_asphalt');
+  for (let i = 0; i < 6; i++) if (rand() < 0.75) await place(pick(CARS), x, z, { dx: -0.3 + (i % 3) * 0.3, dz: i < 3 ? -0.18 : 0.18, lift: KERB });
+}
+// Cars parked in a line between the street and a strip-mall building
+async function frontParking(x, z, d, n = 4) {
+  const [fx, fz] = DIRS[d], alongX = d === 'T' || d === 'B';
+  for (let i = 0; i < n; i++) {
+    if (rand() < 0.2) continue;
+    const along = -0.3 + i * (0.6 / (n - 1)), perp = 0.25;
+    await place(pick(CARS), x, z, { rot: alongX ? 0 : 90, dx: alongX ? along : fx * perp, dz: alongX ? fz * perp : along, lift: KERB });
+  }
+}
+
+const SHOPFRONTS = ['building-block-4floor-short', 'building-block-5floor-short', 'building-block-4floor-front', 'building-block-5floor-front', 'building-cafe', 'building-restaurant', 'building-post', 'building-cinema', 'building-block-5floor'];
+const CORNERS = ['building-block-4floor-corner', 'building-block-5floor-corner'];
+const REAR = ['building-block-4floor-back', 'building-block-5floor', 'building-office', 'building-block-4floor-short'];
+const TOWERS = ['building-office-tall', 'building-office-big', 'building-office-balcony', 'building-office-pyramid', 'building-office-rounded', 'building-skyscraper', 'building-hotel', 'building-office'];
+const FLATS = ['building-block-4floor-short', 'building-block-5floor-short', 'building-block-4floor-front', 'building-block-5floor-front', 'building-house-block-big'];
+const FAMILY = ['building-house-family-small', 'building-house-family-large', 'building-house-modern', 'building-house-modern-big', 'building-cabin-big'];
+const TOWNHOUSES = ['building-house-block', 'building-house-block-old', 'building-house-block-big', 'building-house-block', 'building-house-block-old'];
+const STRIP = ['building-burger-joint', 'building-carwash', 'building-restaurant', 'building-cafe', 'building-casino', 'building-post'];
+const CHINATOWN = ['building-shop-china', 'building-restuarant-china', 'building-market-china', 'building-antique-china', 'building-apartment-china'];
+const INDUSTRY = ['industry-factory', 'industry-factory-hall', 'industry-warehouse', 'industry-building', 'industry-storage', 'industry-refinery'];
+const CIVIC = { T: 'building-museum', B: 'building-bank', H: 'building-hospital', D: 'data-center', X: 'building-firestation', O: 'building-policestation', S: 'building-school' };
+
+async function build() {
+  const powerParts = ['nuclear-power-plant', 'cooling-tower', 'cooling-tower', 'industry-factory-old'];
+  let power = 0, gate = false;
+  for (let z = 0; z < N; z++) for (let x = 0; x < N; x++) {
+    const c = grid[z][x];
+    const { d, k } = facing(x, z);
+    const rot = FACE[d];
+    const sides = roadSides(x, z);
+    const isCorner = sides.length >= 2 && !(sides.includes('T') && sides.includes('B') && sides.length === 2) && !(sides.includes('L') && sides.includes('R') && sides.length === 2);
+    switch (c) {
+      case 'R': case 'M': {
+        let { name, rot: r, arms } = roadPiece(x, z);
+        if (name === 'tile-mainroad-straight' && downtown(x, z) && rand() < 0.5) name = 'tile-mainroad-straight-crosswalk';
+        await place(name, x, z, { rot: r, ground: true, shadow: false });
+        if (!name.includes('straight')) break;
+        const alongX = r % 180 === 90, verge = c === 'M' ? 0.44 : 0.42;
+        // Street trees on residential streets, lamps along main roads
+        if (c === 'R' && !downtown(x, z) && at(x, z - 1) !== 'i' && rand() < 0.45) {
+          for (const sgn of [-1, 1]) await place(pick(['tree-round', 'tree-lime', 'tree-elipse']), x, z, { dx: alongX ? (rand() - 0.5) * 0.6 : sgn * verge, dz: alongX ? sgn * verge : (rand() - 0.5) * 0.6 });
+        }
+        if (c === 'M' && rand() < (downtown(x, z) ? 0.8 : 0.3)) {
+          await place('lamp-road', x, z, { rot: alongX ? 0 : 90, dx: alongX ? 0 : verge, dz: alongX ? -verge : 0 });
+        }
+        // Traffic
+        if (rand() < 0.2) {
+          const lane = (rand() < 0.5 ? -1 : 1) * (c === 'M' ? 0.14 : 0.08);
+          await place(pick(CARS.concat(['bus-passenger'])), x, z, { rot: alongX ? (lane > 0 ? 90 : 270) : (lane > 0 ? 180 : 0), dx: alongX ? (rand() - 0.5) * 0.4 : lane, dz: alongX ? lane : (rand() - 0.5) * 0.4 });
+        }
+        break;
+      }
+      case '~': await place('tile-water', x, z, { ground: true, shadow: false }); break;
+      case 'g': await place('tile-plain_grass', x, z, { ground: true, shadow: false }); if (rand() < 0.5) await trees(x, z, 1 + Math.floor(rand() * 2)); break;
+      case 't': await place('tile-plain_grass', x, z, { ground: true, shadow: false }); await trees(x, z, 3 + Math.floor(rand() * 3), TREES.concat(['tree-fir', 'tree-spruce', 'tree-conifer'])); break;
+      case 'p':
+        await place('tile-park', x, z, { ground: true, shadow: false }); await trees(x, z, 3);
+        if (rand() < 0.5) await place('bench-old', x, z, { dx: 0.18, dz: 0.18, rot: pick([0, 90, 180, 270]) });
+        break;
+      case 'q': await place('tile-park', x, z, { ground: true, shadow: false }); await trees(x, z, 2, ['tree-lime']); break;
+      case 'Q':
+        await place('tile-plain_concrete', x, z, { ground: true, shadow: false, tint: WARM });
+        await place('fountain', x, z, { scale: [3.4, 3.4, 3.4] });
+        for (const [dx, dz, r] of [[0, -0.42, 0], [0, 0.42, 180], [-0.42, 0, 90], [0.42, 0, 270]]) await place('bench-old', x, z, { dx, dz, rot: r });
+        for (const [dx, dz] of [[-0.42, -0.42], [0.42, -0.42], [-0.42, 0.42], [0.42, 0.42]]) await place('lamp-city', x, z, { dx, dz });
+        break;
+      case 'c':
+        if (k >= 2) {
+          // Behind the frontage: mostly buildings, about a third car parks
+          if (rand() < 0.35) { await parking(x, z); break; }
+          await lot(x, z, 'tile-plain_concrete');
+          await row(x, z, d, shuffle(REAR), { setback: 0.12 });
+          break;
+        }
+        await lot(x, z, 'tile-plain_concrete');
+        if (isCorner) await corner(x, z, sides, CORNERS);
+        else await row(x, z, d, shuffle(SHOPFRONTS));
+        if (downtown(x, z) && rand() < 0.5) await place(pick(['bench-old', 'tree-pot', 'bin-wheelie', 'lamp-city']), x, z, { dx: DIRS[d][0] * 0.4 + (DIRS[d][0] ? 0 : (rand() - 0.5) * 0.6), dz: DIRS[d][1] * 0.4 + (DIRS[d][1] ? 0 : (rand() - 0.5) * 0.6), lift: KERB });
+        break;
+      case 'o': await lot(x, z, 'tile-plain_concrete'); await place(pick(TOWERS), x, z, { rot, lift: KERB, dx: (rand() - 0.5) * 0.12, dz: (rand() - 0.5) * 0.12 }); break;
+      case 'a':
+        await lot(x, z, 'tile-plain_concrete');
+        if (isCorner) await corner(x, z, sides, CORNERS);
+        else await row(x, z, d, shuffle(FLATS), { setback: k >= 2 ? 0.2 : 0.05 });
+        await backGarden(x, z, d, 1);
+        break;
+      case 'n':
+        await lot(x, z, 'tile-plain_concrete', 0xf3d9c8);
+        await row(x, z, d, shuffle(CHINATOWN));
+        for (const along of [-0.3, 0, 0.3]) {
+          const [fx, fz] = DIRS[d];
+          await place('lantern-sphere', x, z, { dx: fx ? fx * 0.4 : along, dz: fz ? fz * 0.4 : along, lift: KERB });
+        }
+        if (!gate) { gate = true; await place('gate-china', x, z, { rot: FACE[d] + 90, dx: DIRS[d][0] * 0.42, dz: DIRS[d][1] * 0.42, lift: KERB, scale: [1.6, 1.6, 1.6] }); }
+        break;
+      case 'h':
+        await lot(x, z, 'tile-plain_grass');
+        if (k >= 2) {
+          // Mid-block lots: mostly a house set well back on a long plot, sometimes just a garden
+          if (rand() < 0.65) { await row(x, z, d, [pick(FAMILY)], { setback: 0.2 }); await backGarden(x, z, d, 2); }
+          else { await trees(x, z, 3, TREES, KERB); await place(pick(['grill-round', 'dryer-outside', 'sand-box']), x, z, { lift: KERB }); }
+          break;
+        }
+        if (rand() < 0.45) {
+          await row(x, z, d, shuffle(TOWNHOUSES), { setback: 0.08 });     // a row of narrow townhouses
+          await backGarden(x, z, d, 2);
+        } else {
+          await row(x, z, d, [pick(FAMILY)], { setback: 0.14 });          // one family house behind a front garden
+          const [fx, fz] = DIRS[d];
+          await place(pick(TREES), x, z, { dx: fx ? fx * 0.36 : 0.3, dz: fz ? fz * 0.36 : 0.3, lift: KERB });
+          await backGarden(x, z, d, 1 + Math.floor(rand() * 2));
+        }
+        break;
+      case 's':
+        await lot(x, z, 'tile-plain_asphalt');
+        await row(x, z, d, [pick(STRIP)], { back: true, setback: 0.04 });   // the shop at the back...
+        await frontParking(x, z, d);                                       // ...and its car park in front
+        break;
+      case 'm': await lot(x, z, 'tile-plain_asphalt'); await row(x, z, d, ['building-mall'], { back: true, setback: 0.04 }); await frontParking(x, z, d, 5); break;
+      case 'P': await parking(x, z); break;
+      case 'i':
+        await lot(x, z, 'tile-plain_asphalt');
+        await place(pick(INDUSTRY), x, z, { rot, lift: KERB, dx: (rand() - 0.5) * 0.15, dz: (rand() - 0.5) * 0.15 });
+        if (rand() < 0.5) await place(pick(['car-truck-tanker', 'truck', 'forklift', 'cargo-shipping_red', 'cargo-shipping_blue']), x, z, { dx: 0.32, dz: 0.32, lift: KERB, rot: pick([0, 90]) });
+        break;
+      case 'E': await lot(x, z, 'tile-plain_asphalt'); await place(powerParts[power++ % 4], x, z, { rot, lift: KERB }); break;
+      case 'W': await lot(x, z, 'tile-plain_concrete'); await place('industry-storage', x, z, { rot: 90, lift: KERB, dx: -0.2 }); await place('industry-storage', x, z, { rot: 90, lift: KERB, dx: 0.2 }); break;
+      case 'C': await lot(x, z, 'tile-plain_grass'); await place('control-tower', x, z, { lift: KERB }); break;
+      case 'k': {
+        await lot(x, z, 'tile-plain_concrete');
+        if (x === 24) { await place('building-port-sea', x, z, { rot, lift: KERB }); break; }
+        const boxes = ['cargo-shipping_blue', 'cargo-shipping_red', 'cargo-shipping_orange', 'cargo-shipping_green', 'cargo-shipping_white'];
+        for (let i = 0; i < 6; i++) await place(pick(boxes), x, z, { dx: -0.25 + (i % 3) * 0.25, dz: i < 3 ? -0.15 : 0.15, lift: KERB });
+        break;
+      }
+      default:
+        if (CIVIC[c]) { await lot(x, z, 'tile-plain_concrete', WARM); await place(CIVIC[c], x, z, { rot, lift: KERB }); }
+    }
+  }
+  await place('ship-cargo', 26, 0.5, { rot: 90 });
+  await place('boat-sail', 8, 0.8, { rot: 90 });
+  await place('boat-fishing', 13, 1.2, { rot: 270 });
+}
+await build();
+
+// ---------------------------------------------------------------- rendering
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, alpha: true });
+renderer.setSize(W, H);
+renderer.setClearColor(0x000000, 0);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+
+function render(centre, half) {
+  const scene = new THREE.Scene();
+  scene.add(city);
+  // Lights as in Game.#setupLights, scaled to the view
+  const sun = new THREE.DirectionalLight(0xffffff, 2);
+  sun.position.copy(centre).add(new THREE.Vector3(-10, 20, 0).multiplyScalar(Math.max(1, half / 6)));
+  sun.target.position.copy(centre);
+  sun.castShadow = true;
+  const s = half * 1.8;
+  Object.assign(sun.shadow.camera, { left: -s, right: s, top: s, bottom: -s, near: 1, far: 400 });
+  sun.shadow.mapSize.set(4096, 4096);
+  sun.shadow.normalBias = 0.01;
+  scene.add(sun, sun.target, new THREE.AmbientLight(0xffffff, 0.5));
+  // Camera as in CameraManager: orthographic, azimuth 225°, elevation 45°
+  const aspect = W / H;
+  const cam = new THREE.OrthographicCamera(-half * aspect, half * aspect, half, -half, 1, 1000);
+  cam.position.set(centre.x + 100 * Math.sin(225 * DEG) * Math.cos(45 * DEG), 100 * Math.sin(45 * DEG), centre.z + 100 * Math.cos(225 * DEG) * Math.cos(45 * DEG));
+  cam.lookAt(centre);
+  renderer.render(scene, cam);
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  const grad = ctx.createLinearGradient(0, H, 0, 0);
+  grad.addColorStop(0, '#3a5177'); grad.addColorStop(1, '#81b1e0');
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(renderer.domElement, 0, 0);
+  return c;
+}
+async function post(body, name) { await fetch(`save?name=${name}`, { method: 'POST', body }); }
+const png = (canvas) => new Promise((r) => canvas.toBlob(r, 'image/png'));
+
+const legend = `
+~ river   t trees   g grass   R street   M main road   q square (park)   Q square (fountain)   p park
+c downtown / shops   o office towers   a apartments   h houses   n Chinatown   s shopping strip   m mall   P car park
+i industry   E power station   W water works   k port   C phone mast
+T town hall   B bank   H hospital   D data centre   X fire station   O police   S school
+`;
+await post(grid.map((r) => r.join('')).join('\n') + '\n' + legend, 'city-map-v2.txt');
+await post(await png(render(new THREE.Vector3(15.5, 0, 15.5), 18)), 'city2-whole');
+await post(await png(render(new THREE.Vector3(15, 0, 15), 7.5)), 'city2-downtown');
+await post(await png(render(new THREE.Vector3(25.5, 0, 19.5), 5)), 'city2-neighbourhood');
+await post(await png(render(new THREE.Vector3(8, 0, 25.5), 4.5)), 'city2-strip');
+document.title = 'done';
+</script>
+</body>
+</html>

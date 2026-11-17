@@ -1,0 +1,37 @@
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tWWtttttttttttttttttkkkkkkkkkktt
+MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM
+hhhhRhhhhgcccccMcccccgiiiiRiiiii
+hhhhRhhhhghhhhhMhhhhhgiiiiRiEEii
+hhhhRRRRRRRRRRRMRRRRRRRRRRRiEEii
+hhhhRhhhhghhphhMhhhhhgiiiiRiiiii
+hChhRhhhhgaaaaaMaaaaagiiiiRiiiii
+ggggRggggRRRRRRMRRRRRRggggRggggg
+hhhhRhhhhRcccccMcccccRaaaaRhhhhh
+hhhhRchhhRcccccMcccccRXaaaRchhhh
+RRRRRRRRRRcccccMcccccRRRRRRRRRRR
+hhhhRhhhhRcccRRRRRcccRaaaaRhhhhh
+hhhhRhhhhRcccRqqqRBccRaaaaRhhhhh
+MMMMMMMMMMMMMRqQqRMMMMMMMMMMMMMM
+hhhhRhhhhRcccRqqqRoooRaHaDRhhhhh
+hhphRhhhhRcccRRRRRoooRaaaaRhhphh
+hhhhRhhhhRccccTMccoooRaaaaRhhhhh
+RRRRRRRRRRcccccMoooooRRRRRRRRRRR
+hhhhRcShhRcccccMoooooROaaaRchhhh
+hhhhRhhhhRRRRRRMRRRRRRnnnnRhhhhh
+hhhhRhhhhgaaaaaMpppppRnnnnRhhhhh
+hhhhRhhhhgaaaaaMpppppRnnnnRhhhhh
+RRRRRRRRRRRRRRRMpppppRRRRRRRRRRR
+hhhhRhhhhgaaaaaMpppppRaaaaRhhhhh
+ssssRsssssssPssMsssssRssssRsssss
+MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM
+ssssssmPsssssssMssssmPsssPssssss
+tttttttttttttttMtttttttttttttttt
+tttttttttttttttMtttttttttttttCtt
+tttttttttttttttMtttttttttttttttt
+
+~ river   t trees   g grass   R street   M main road   q square (park)   Q square (fountain)   p park
+c downtown / shops   o office towers   a apartments   h houses   n Chinatown   s shopping strip   m mall   P car park
+i industry   E power station   W water works   k port   C phone mast
+T town hall   B bank   H hospital   D data centre   X fire station   O police   S school

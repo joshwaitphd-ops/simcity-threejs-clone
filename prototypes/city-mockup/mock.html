@@ -1,0 +1,204 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<script type="importmap">
+  { "imports": { "three": "./three/build/three.module.js", "three/addons/": "./three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<canvas id="out"></canvas>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const W = 1400, H = 900;
+const DEG = Math.PI / 180;
+
+// Same material set-up as src/scripts/assets/assetManager.js
+const tex = new THREE.TextureLoader();
+const base = tex.load('textures/base.png');
+base.colorSpace = THREE.SRGBColorSpace; base.flipY = false;
+const spec = tex.load('textures/specular.png');
+spec.colorSpace = THREE.SRGBColorSpace; spec.flipY = false;
+const material = new THREE.MeshLambertMaterial({ map: base, specularMap: spec });
+await new Promise((r) => { const check = () => base.image ? r() : setTimeout(check, 50); check(); });
+
+const loader = new GLTFLoader();
+const cache = {};
+async function model(name) {
+  if (!cache[name]) {
+    cache[name] = await new Promise((res, rej) => loader.load(`models/${name}.glb`, (g) => res(g.scene), undefined, rej));
+    cache[name].traverse((o) => { if (o.material) { o.material = material; o.castShadow = true; o.receiveShadow = true; } });
+    cache[name].scale.setScalar(1 / 30);
+  }
+  return cache[name].clone();
+}
+
+// Place a model centred on (x + dx, z + dz), resting on the ground (y = 0), rotated in 90° steps
+async function place(group, name, x, z, { rot = 0, dx = 0, dz = 0, ground = false, shadow = true } = {}) {
+  const m = await model(name);
+  m.rotation.y = rot * DEG;
+  const box = new THREE.Box3().setFromObject(m);
+  const c = box.getCenter(new THREE.Vector3());
+  m.position.set(x + dx - c.x, ground ? -box.max.y : -box.min.y, z + dz - c.z);
+  m.traverse((o) => { if (o.isMesh) o.castShadow = shadow; });
+  group.add(m);
+}
+
+let seed = 7;
+const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+
+// ---- The block: x runs 0..5, z runs 0..4. The game's camera looks from -x, -z.
+// z=0 park, gardens, car park · z=1 main road · z=2 shops facing the main road · z=3 back row · z=4 back street
+const shops = ['building-cafe', 'building-block-5floor-front', 'building-bank', 'building-restaurant', 'building-post', 'building-block-5floor-corner'];
+const backRow = ['building-block-4floor-back', 'building-block-4floor-short', 'building-office-rounded', 'building-block-4floor-back', 'building-hotel', 'building-block-4floor-corner'];
+
+async function today() {
+  const g = new THREE.Group();
+  for (let x = 0; x < 6; x++) {
+    await place(g, 'tile-road-straight', x, 1, { rot: 90, ground: true, shadow: false });
+    await place(g, 'tile-road-straight', x, 4, { rot: 90, ground: true, shadow: false });
+    for (const z of [0, 2, 3]) await place(g, 'tile-plain_grass', x, z, { ground: true, shadow: false });
+    await place(g, shops[x], x, 2, { rot: 90 * Math.floor(4 * rand()) });
+    await place(g, backRow[x], x, 3, { rot: 90 * Math.floor(4 * rand()) });
+  }
+  await place(g, 'building-house-family-small', 2, 0, { rot: 90 * Math.floor(4 * rand()) });
+  await place(g, 'building-house-family-large', 3, 0, { rot: 90 * Math.floor(4 * rand()) });
+  return g;
+}
+
+async function dressed() {
+  const g = new THREE.Group();
+  // Ground and roads
+  for (let x = 0; x < 6; x++) {
+    await place(g, x === 3 ? 'tile-mainroad-straight-crosswalk' : 'tile-mainroad-straight', x, 1, { rot: 90, ground: true, shadow: false });
+    await place(g, 'tile-road-straight', x, 4, { rot: 90, ground: true, shadow: false });
+    await place(g, 'tile-plain_concrete', x, 2, { ground: true, shadow: false });
+    await place(g, x === 2 ? 'tile-plain_asphalt' : 'tile-plain_concrete', x, 3, { ground: true, shadow: false });
+  }
+  for (const [x, t] of [[0, 'tile-park'], [1, 'tile-park'], [2, 'tile-plain_grass'], [3, 'tile-plain_grass'], [4, 'tile-plain_asphalt'], [5, 'tile-plain_asphalt']]) {
+    await place(g, t, x, 0, { ground: true, shadow: false });
+  }
+
+  // Shops face the main road (-z); the back row faces the back street (+z)
+  for (let x = 0; x < 6; x++) {
+    await place(g, shops[x], x, 2, { rot: 180, dz: 0.06 });
+    await place(g, backRow[x], x, 3, { rot: 0, dz: -0.04 });
+  }
+
+  // Shop fronts
+  await place(g, 'chair-folding', 0, 2, { dx: -0.3, dz: -0.38 });
+  await place(g, 'chair-folding', 0, 2, { dx: -0.2, dz: -0.4, rot: 90 });
+  await place(g, 'tree-pot', 0, 2, { dx: 0.35, dz: -0.38 });
+  await place(g, 'bin-wheelie', 1, 2, { dx: 0.36, dz: -0.36 });
+  await place(g, 'lamp-city', 1, 2, { dx: -0.42, dz: -0.44 });
+  await place(g, 'atm-mechine', 2, 2, { dx: 0.3, dz: -0.4, rot: 180 });
+  await place(g, 'tree-pot', 2, 2, { dx: -0.36, dz: -0.4 });
+  await place(g, 'marketplace-stand-simple', 3, 2, { dx: 0.28, dz: -0.38, rot: 180 });
+  await place(g, 'lamp-city', 3, 2, { dx: -0.42, dz: -0.44 });
+  await place(g, 'mail-box', 4, 2, { dx: -0.3, dz: -0.4, rot: 180 });
+  await place(g, 'bike-stand', 4, 2, { dx: 0.25, dz: -0.42 });
+  await place(g, 'bike-old', 4, 2, { dx: 0.25, dz: -0.38, rot: 90 });
+  await place(g, 'bench-old', 5, 2, { dx: 0.05, dz: -0.42, rot: 180 });
+  await place(g, 'lamp-city', 5, 2, { dx: -0.42, dz: -0.44 });
+
+  // Main road: verge furniture and traffic
+  for (const x of [0, 2, 4]) await place(g, 'lamp-road', x, 1, { dz: -0.44, rot: 0 });
+  await place(g, 'bus-stop', 1, 1, { dz: 0.43, rot: 180 });
+  await place(g, 'traffic-lights', 3, 1, { dx: -0.4, dz: 0.43, rot: 180 });
+  await place(g, 'traffic-lights', 3, 1, { dx: 0.4, dz: -0.43 });
+  await place(g, 'bus-passenger', 1, 1, { dz: 0.2, rot: 90 });
+  await place(g, 'car-taxi', 2.4, 1, { dz: -0.08, rot: 270 });
+  await place(g, 'car-passenger', 4.4, 1, { dz: 0.08, rot: 90 });
+  await place(g, 'truck', 5.2, 1, { dz: -0.2, rot: 270 });
+
+  // Back row: service yards
+  await place(g, 'dumpster', 1, 3, { dx: 0.35, dz: 0.38 });
+  await place(g, 'car-hippie-van', 2, 3, { dx: -0.2, dz: 0.25 });
+  await place(g, 'car-veteran', 2, 3, { dx: 0.2, dz: 0.25 });
+  await place(g, 'tree-lime', 3, 3, { dx: -0.4, dz: 0.4 });
+  await place(g, 'dumpster', 5, 3, { dx: -0.35, dz: 0.38 });
+  for (const x of [0.5, 2.5, 4.5]) await place(g, 'tree-round', x, 4, { dz: 0.45 });
+
+  // Front row: a small park, two back gardens, a car park
+  await place(g, 'fountain', 0, 0);
+  for (const [dx, dz] of [[-0.35, -0.35], [0.35, -0.35], [-0.35, 0.35], [0.35, 0.35]]) await place(g, 'tree-oak', 0, 0, { dx, dz });
+  await place(g, 'bench-forest', 1, 0, { dz: 0.2, rot: 0 });
+  for (const [dx, dz] of [[-0.3, -0.3], [0.3, -0.3]]) await place(g, 'tree-lime', 1, 0, { dx, dz });
+  await place(g, 'lamp-city', 1, 0, { dx: 0.3, dz: 0.3 });
+  await place(g, 'building-house-family-small', 2, 0, { rot: 0, dz: 0.15 });
+  await place(g, 'tree-birch', 2, 0, { dx: -0.32, dz: -0.3 });
+  await place(g, 'grill-round', 2, 0, { dx: 0.2, dz: -0.3 });
+  await place(g, 'dryer-outside', 2, 0, { dx: 0, dz: -0.42 });
+  await place(g, 'building-house-family-large', 3, 0, { rot: 0, dz: 0.15 });
+  await place(g, 'sand-box', 3, 0, { dx: -0.25, dz: -0.3 });
+  await place(g, 'tree-oak', 3, 0, { dx: 0.32, dz: -0.32 });
+  const parked = ['car-passenger', 'car-taxi', 'car-hippie-van', 'car-veteran', 'car-passenger-race', 'car-police'];
+  for (let i = 0; i < 6; i++) await place(g, parked[i], 4 + (i % 3) * 0.3 - 0.3 + Math.floor(i / 3), 0, { dz: -0.15, rot: 0 });
+  await place(g, 'tree-poplar', 5, 0, { dx: 0.4, dz: 0.4 });
+  return g;
+}
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, alpha: true });
+renderer.setSize(W, H);
+renderer.setClearColor(0x000000, 0);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+
+function render(group, centre = new THREE.Vector3(2.5, 0, 2), half = 3.1) {
+  const scene = new THREE.Scene();
+  scene.add(group);
+  // Lights as in Game.#setupLights, moved to the block
+  const sun = new THREE.DirectionalLight(0xffffff, 2);
+  sun.position.copy(centre).add(new THREE.Vector3(-10, 20, 0));
+  sun.target.position.copy(centre);
+  sun.castShadow = true;
+  Object.assign(sun.shadow.camera, { left: -8, right: 8, top: 8, bottom: -8, near: 5, far: 50 });
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.normalBias = 0.01;
+  scene.add(sun, sun.target, new THREE.AmbientLight(0xffffff, 0.5));
+  // Camera as in CameraManager: orthographic, azimuth 225°, elevation 45°
+  const aspect = W / H;
+  const cam = new THREE.OrthographicCamera(-half * aspect, half * aspect, half, -half, 1, 1000);
+  cam.position.set(
+    centre.x + 100 * Math.sin(225 * DEG) * Math.cos(45 * DEG),
+    100 * Math.sin(45 * DEG),
+    centre.z + 100 * Math.cos(225 * DEG) * Math.cos(45 * DEG));
+  cam.lookAt(centre);
+  renderer.render(scene, cam);
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  const grad = ctx.createLinearGradient(0, H, 0, 0);
+  grad.addColorStop(0, '#3a5177'); grad.addColorStop(1, '#81b1e0');
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(renderer.domElement, 0, 0);
+  return c;
+}
+
+async function post(canvas, name) {
+  const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+  await fetch(`save?name=${name}`, { method: 'POST', body: blob });
+}
+
+const a = render(await today());
+const dressedBlock = await dressed();
+const b = render(dressedBlock);
+await post(a, 'mock-today');
+await post(b, 'mock-dressed');
+await post(render(dressedBlock, new THREE.Vector3(2, 0, 1.5), 1.2), 'mock-closeup');
+
+const both = document.getElementById('out');
+both.width = W * 2 + 20; both.height = H + 60;
+const ctx = both.getContext('2d');
+ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, both.width, both.height);
+ctx.drawImage(a, 0, 60); ctx.drawImage(b, W + 20, 60);
+ctx.fillStyle = '#212529'; ctx.font = 'bold 30px -apple-system, Helvetica, sans-serif';
+ctx.fillText('Today: grass under everything, random rotation, local roads', 20, 40);
+ctx.fillText('Dressed: same buildings, bases, main road, props', W + 40, 40);
+await post(both, 'mock-compare');
+document.title = 'done';
+</script>
+</body>
+</html>

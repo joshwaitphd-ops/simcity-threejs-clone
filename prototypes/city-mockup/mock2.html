@@ -1,0 +1,223 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<script type="importmap">
+  { "imports": { "three": "./three/build/three.module.js", "three/addons/": "./three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<canvas id="out"></canvas>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const W = 1400, H = 900;
+const DEG = Math.PI / 180;
+
+// Same material set-up as src/scripts/assets/assetManager.js, plus optional tints
+const tex = new THREE.TextureLoader();
+const base = tex.load('textures/base.png');
+base.colorSpace = THREE.SRGBColorSpace; base.flipY = false;
+const spec = tex.load('textures/specular.png');
+spec.colorSpace = THREE.SRGBColorSpace; spec.flipY = false;
+await new Promise((r) => { const check = () => base.image ? r() : setTimeout(check, 50); check(); });
+const materials = {};
+const materialFor = (tint = 0xffffff) =>
+  materials[tint] ??= new THREE.MeshLambertMaterial({ map: base, specularMap: spec, color: tint });
+
+const loader = new GLTFLoader();
+const cache = {};
+async function model(name) {
+  cache[name] ??= await new Promise((res, rej) => loader.load(`models/${name}.glb`, (g) => res(g.scene), undefined, rej));
+  return cache[name].clone();
+}
+
+// Place a model centred on (x + dx, z + dz), resting on y = lift (or with its top at y = lift for ground tiles)
+async function place(group, name, x, z, { rot = 0, dx = 0, dz = 0, ground = false, shadow = true, scale = [1, 1, 1], lift = 0, tint } = {}) {
+  const m = await model(name);
+  m.traverse((o) => { if (o.isMesh) { o.material = materialFor(tint); o.castShadow = shadow; o.receiveShadow = true; } });
+  m.scale.set(scale[0] / 30, scale[1] / 30, scale[2] / 30);
+  m.rotation.y = rot * DEG;
+  const box = new THREE.Box3().setFromObject(m);
+  const c = box.getCenter(new THREE.Vector3());
+  m.position.set(x + dx - c.x, (ground ? -box.max.y : -box.min.y) + lift, z + dz - c.z);
+  group.add(m);
+}
+
+// ---- Town centre: x 0..7, z 0..6, a 3×3 square in the middle ringed by roads
+const key = (x, z) => `${x},${z}`;
+const roads = new Set();
+for (let z = 1; z <= 5; z++) { roads.add(key(2, z)); roads.add(key(6, z)); }
+for (let x = 3; x <= 5; x++) { roads.add(key(x, 1)); roads.add(key(x, 5)); }
+for (const [x, z] of [[4, 0], [4, 6], [0, 3], [1, 3], [7, 3]]) roads.add(key(x, z));
+const exits = new Set([key(4, 0), key(4, 6), key(0, 3), key(7, 3)]);
+const isRoad = (x, z, from) => roads.has(key(x, z)) || (exits.has(from) && (x < 0 || x > 7 || z < 0 || z > 6));
+
+// Same neighbour rules as src/scripts/sim/buildings/transportation/road.js
+function roadPiece(x, z) {
+  const k = key(x, z);
+  const top = isRoad(x, z - 1, k), bottom = isRoad(x, z + 1, k), left = isRoad(x - 1, z, k), right = isRoad(x + 1, z, k);
+  const rules = [
+    [top && bottom && left && right, 'tile-road-intersection', 0],
+    [!top && bottom && left && right, 'tile-road-intersection-t', 0],
+    [top && !bottom && left && right, 'tile-road-intersection-t', 180],
+    [top && bottom && !left && right, 'tile-road-intersection-t', 90],
+    [top && bottom && left && !right, 'tile-road-intersection-t', 270],
+    [top && !bottom && left && !right, 'tile-road-curve', 180],
+    [top && !bottom && !left && right, 'tile-road-curve', 90],
+    [!top && bottom && left && !right, 'tile-road-curve', 270],
+    [!top && bottom && !left && right, 'tile-road-curve', 0],
+    [top && bottom, 'tile-road-straight', 0],
+    [left && right, 'tile-road-straight', 90],
+  ];
+  const [, name, rot] = rules.find(([ok]) => ok) ?? [true, 'tile-road-end', 0];
+  return { name, rot };
+}
+
+// Lots: [x, z, model, facing rotation, lot surface]
+const lots = [
+  [0, 0, null, 0, 'trees'], [1, 0, 'building-house-family-small', 0, 'grass'], [2, 0, 'building-cafe', 0, 'shop'],
+  [3, 0, 'building-restaurant', 0, 'shop'], [5, 0, 'building-post', 0, 'shop'], [6, 0, 'building-burger-joint', 0, 'shop'],
+  [7, 0, 'building-block-4floor-corner', 0, 'shop'],
+  [1, 1, 'building-house-modern', 90, 'grass'], [1, 2, 'building-cinema', 90, 'shop'],
+  [1, 4, 'building-house-family-large', 90, 'grass'], [1, 5, 'building-block-4floor-short', 90, 'shop'],
+  [0, 1, null, 0, 'parking'], [0, 2, 'building-house-block', 90, 'grass'], [0, 4, 'building-house-block-big', 90, 'grass'],
+  [0, 5, null, 0, 'trees'],
+  [0, 6, 'building-block-5floor-corner', 180, 'shop'], [1, 6, 'building-block-5floor-front', 180, 'shop'],
+  [2, 6, 'building-office', 180, 'shop'], [3, 6, 'building-museum', 180, 'civic'], [5, 6, 'building-bank', 180, 'civic'],
+  [6, 6, 'building-office-tall', 180, 'shop'], [7, 6, 'building-office-balcony', 180, 'shop'],
+  [7, 1, 'building-hotel', 270, 'shop'], [7, 2, 'building-hospital', 270, 'civic'], [7, 4, 'data-center', 270, 'shop'],
+  [7, 5, 'building-office-rounded', 270, 'shop'],
+];
+const surface = {
+  shop: ['tile-plain_concrete', undefined],
+  civic: ['tile-plain_concrete', 0xffe7c7],
+  grass: ['tile-plain_grass', undefined],
+  trees: ['tile-plain_grass', undefined],
+  parking: ['tile-plain_asphalt', undefined],
+};
+const PAVEMENT = 0xa9a9a9, LOT = 0.86, KERB = 0.03;
+
+async function town() {
+  const g = new THREE.Group();
+  for (const k of roads) {
+    const [x, z] = k.split(',').map(Number);
+    const { name, rot } = roadPiece(x, z);
+    await place(g, name, x, z, { rot, ground: true, shadow: false });
+  }
+
+  // Every lot: a darker pavement, with the lot raised and inset on top of it
+  for (const [x, z, name, rot, kind] of lots) {
+    const [tile, tint] = surface[kind];
+    await place(g, 'tile-plain_concrete', x, z, { ground: true, shadow: false, tint: PAVEMENT });
+    await place(g, tile, x, z, { ground: true, shadow: false, tint, scale: [LOT, 1, LOT], lift: KERB });
+    if (name) await place(g, name, x, z, { rot, lift: KERB });
+  }
+  for (const [x, z] of [[0, 0], [0, 5]]) {
+    for (const [dx, dz] of [[-0.22, -0.2], [0.2, -0.24], [0, 0.18], [0.24, 0.22], [-0.24, 0.2]]) await place(g, 'tree-oak', x, z, { dx, dz, lift: KERB });
+  }
+  const parked = ['car-passenger', 'car-taxi', 'car-hippie-van', 'car-veteran', 'car-passenger-race'];
+  for (let i = 0; i < 5; i++) await place(g, parked[i], 0, 1, { dx: -0.28 + i * 0.14, dz: -0.15, lift: KERB });
+  for (const [x, z] of [[1, 0], [1, 1], [1, 4], [0, 2], [0, 4]]) await place(g, 'tree-round', x, z, { dx: -0.3, dz: -0.3, lift: KERB });
+
+  // The square: a paved centre with the fountain, park tiles around it
+  for (let x = 3; x <= 5; x++) for (let z = 2; z <= 4; z++) {
+    if (x === 4 && z === 3) await place(g, 'tile-plain_concrete', x, z, { ground: true, shadow: false, tint: 0xffe7c7 });
+    else await place(g, 'tile-park', x, z, { ground: true, shadow: false });
+  }
+  await place(g, 'fountain', 4, 3, { scale: [3.4, 3.4, 3.4] });
+  for (const [dx, dz, rot] of [[0, -0.42, 0], [0, 0.42, 180], [-0.42, 0, 90], [0.42, 0, 270]]) await place(g, 'bench-old', 4, 3, { dx, dz, rot });
+  for (const [dx, dz] of [[-0.42, -0.42], [0.42, -0.42], [-0.42, 0.42], [0.42, 0.42]]) await place(g, 'lamp-city', 4, 3, { dx, dz });
+  for (const [x, z] of [[3, 2], [5, 2], [3, 4], [5, 4]]) {
+    for (const [dx, dz] of [[-0.28, -0.28], [0.28, 0.28], [-0.28, 0.28], [0.28, -0.28]]) await place(g, 'tree-lime', x, z, { dx, dz });
+  }
+  await place(g, 'marketplace-stand-simple', 4, 2, { dx: -0.28, dz: -0.2, rot: 180 });
+  await place(g, 'marketplace-stand-simple', 4, 2, { dx: 0.28, dz: -0.2, rot: 180 });
+  await place(g, 'flowers-window', 3, 3, { dx: 0.2, dz: 0.25 });
+
+  // Street trees and lamps along the ring
+  for (let x = 3; x <= 5; x += 2) for (const z of [1, 5]) {
+    await place(g, 'tree-poplar', x, z, { dz: z === 1 ? -0.42 : 0.42 });
+  }
+  for (let z = 2; z <= 4; z += 2) for (const x of [2, 6]) {
+    await place(g, 'tree-poplar', x, z, { dx: x === 2 ? -0.42 : 0.42 });
+  }
+  for (const [x, z, dx, dz] of [[3, 1, 0, 0.42], [5, 1, 0, 0.42], [3, 5, 0, -0.42], [5, 5, 0, -0.42], [2, 2, 0.42, 0], [2, 4, 0.42, 0], [6, 2, -0.42, 0], [6, 4, -0.42, 0]]) {
+    await place(g, 'lamp-road', x, z, { dx, dz, rot: dx ? 90 : 0 });
+  }
+
+  // Traffic
+  await place(g, 'car-taxi', 3.6, 1, { dz: 0.1, rot: 90 });
+  await place(g, 'bus-passenger', 6, 3.6, { dx: 0.1, rot: 0 });
+  await place(g, 'car-passenger', 2, 2.4, { dx: -0.1, rot: 180 });
+  await place(g, 'car-police', 4.6, 5, { dz: -0.1, rot: 270 });
+  await place(g, 'car-ambulance-pickup', 6, 2.1, { dx: -0.1, rot: 180 });
+  await place(g, 'armored-truck', 5.3, 5, { dz: 0.1, rot: 90 });
+  return g;
+}
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, alpha: true });
+renderer.setSize(W, H);
+renderer.setClearColor(0x000000, 0);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+
+function render(group, lighting, centre = new THREE.Vector3(3.5, 0, 3), half = 4.3) {
+  const scene = new THREE.Scene();
+  scene.add(group);
+  const warm = lighting === 'warm';
+  const sun = new THREE.DirectionalLight(warm ? 0xfff0d8 : 0xffffff, warm ? 2.3 : 2);
+  sun.position.copy(centre).add(new THREE.Vector3(-10, 20, warm ? -6 : 0));
+  sun.target.position.copy(centre);
+  sun.castShadow = true;
+  Object.assign(sun.shadow.camera, { left: -10, right: 10, top: 10, bottom: -10, near: 5, far: 60 });
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.normalBias = 0.01;
+  scene.add(sun, sun.target);
+  // Game: flat white ambient. Warm: a sky/ground hemisphere light, so faces pointing up and down shade differently
+  scene.add(warm ? new THREE.HemisphereLight(0xcfe3ff, 0x7a6248, 1.0) : new THREE.AmbientLight(0xffffff, 0.5));
+  // Camera as in CameraManager: orthographic, azimuth 225°, elevation 45°
+  const aspect = W / H;
+  const cam = new THREE.OrthographicCamera(-half * aspect, half * aspect, half, -half, 1, 1000);
+  cam.position.set(
+    centre.x + 100 * Math.sin(225 * DEG) * Math.cos(45 * DEG),
+    100 * Math.sin(45 * DEG),
+    centre.z + 100 * Math.cos(225 * DEG) * Math.cos(45 * DEG));
+  cam.lookAt(centre);
+  renderer.render(scene, cam);
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  const grad = ctx.createLinearGradient(0, H, 0, 0);
+  grad.addColorStop(0, '#3a5177'); grad.addColorStop(1, '#81b1e0');
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(renderer.domElement, 0, 0);
+  return c;
+}
+
+async function post(canvas, name) {
+  const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+  await fetch(`save?name=${name}`, { method: 'POST', body: blob });
+}
+
+const block = await town();
+const a = render(block, 'game');
+const b = render(block, 'warm');
+await post(a, 'v2-game-lighting');
+await post(b, 'v2-warm-lighting');
+await post(render(block, 'warm', new THREE.Vector3(4, 0, 3.4), 1.7), 'v2-square-closeup');
+
+const both = document.getElementById('out');
+both.width = W * 2 + 20; both.height = H + 60;
+const ctx = both.getContext('2d');
+ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, both.width, both.height);
+ctx.drawImage(a, 0, 60); ctx.drawImage(b, W + 20, 60);
+ctx.fillStyle = '#212529'; ctx.font = 'bold 30px -apple-system, Helvetica, sans-serif';
+ctx.fillText("Game's lighting today", 20, 40);
+ctx.fillText('Warmer sun and a sky light', W + 40, 40);
+await post(both, 'v2-compare');
+document.title = 'done';
+</script>
+</body>
+</html>
