@@ -7,11 +7,21 @@
 </script>
 </head>
 <body>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: linear-gradient(0deg, #3a5177, #81b1e0); font: 14px -apple-system, Helvetica, sans-serif; color: #fff; }
+  #loading { position: fixed; inset: 0; display: grid; place-items: center; font-size: 22px; }
+  #help { position: fixed; left: 16px; bottom: 16px; opacity: 0.85; }
+</style>
+<div id="loading">Building the city…</div>
+<div id="help">Drag to pan · Right-drag to rotate · Scroll to zoom</div>
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 const W = 1800, H = 1150, N = 32, DEG = Math.PI / 180;
+// ?live draws the city in the window with camera controls; without it the page renders images for sheet_server.py
+const params = new URLSearchParams(location.search);
+const LIVE = params.has('live');
 
 // ---------------------------------------------------------------- the map
 const grid = Array.from({ length: N }, () => Array(N).fill('g'));
@@ -402,11 +412,64 @@ c downtown / shops   o office towers   a apartments   h houses   n Chinatown   s
 i industry   E power station   W water works   k port   C phone mast
 T town hall   B bank   H hospital   D data centre   X fire station   O police   S school
 `;
-await post(grid.map((r) => r.join('')).join('\n') + '\n' + legend, 'city-map-v2.txt');
-await post(await png(render(new THREE.Vector3(15.5, 0, 15.5), 18)), 'city2-whole');
-await post(await png(render(new THREE.Vector3(15, 0, 15), 7.5)), 'city2-downtown');
-await post(await png(render(new THREE.Vector3(25.5, 0, 19.5), 5)), 'city2-neighbourhood');
-await post(await png(render(new THREE.Vector3(8, 0, 25.5), 4.5)), 'city2-strip');
+// The city in the window, with the game's camera angle: drag to pan, right-drag to rotate, scroll to zoom
+async function live() {
+  const { OrbitControls } = await import('three/addons/controls/OrbitControls.js');
+  const view = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  view.setPixelRatio(Math.min(devicePixelRatio, 2));
+  view.setSize(innerWidth, innerHeight);
+  view.setClearColor(0x000000, 0);
+  view.shadowMap.enabled = true;
+  view.shadowMap.type = THREE.PCFShadowMap;
+  view.shadowMap.autoUpdate = false;   // nothing moves, so shadows are drawn once
+  document.body.appendChild(view.domElement);
+
+  const scene = new THREE.Scene();
+  scene.add(city);
+  const centre = new THREE.Vector3(15.5, 0, 15.5);
+  const sun = new THREE.DirectionalLight(0xffffff, 2);
+  sun.position.copy(centre).add(new THREE.Vector3(-30, 60, 0));
+  sun.target.position.copy(centre);
+  sun.castShadow = true;
+  Object.assign(sun.shadow.camera, { left: -26, right: 26, top: 26, bottom: -26, near: 1, far: 400 });
+  sun.shadow.mapSize.set(4096, 4096);
+  sun.shadow.normalBias = 0.01;
+  scene.add(sun, sun.target, new THREE.AmbientLight(0xffffff, 0.5));
+
+  const half = 18;
+  const cam = new THREE.OrthographicCamera(-half * innerWidth / innerHeight, half * innerWidth / innerHeight, half, -half, 1, 1000);
+  cam.position.set(centre.x + 100 * Math.sin(225 * DEG) * Math.cos(45 * DEG), 100 * Math.sin(45 * DEG), centre.z + 100 * Math.cos(225 * DEG) * Math.cos(45 * DEG));
+  const controls = new OrbitControls(cam, view.domElement);
+  controls.target.copy(centre);
+  controls.minPolarAngle = controls.maxPolarAngle = 45 * DEG;   // fixed elevation, as in CameraManager
+  controls.minZoom = 0.8; controls.maxZoom = 12;
+  controls.screenSpacePanning = false;
+  controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+  controls.update();
+
+  const draw = () => view.render(scene, cam);
+  controls.addEventListener('change', draw);
+  addEventListener('resize', () => {
+    const aspect = innerWidth / innerHeight;
+    Object.assign(cam, { left: -half * aspect, right: half * aspect });
+    cam.updateProjectionMatrix();
+    view.setSize(innerWidth, innerHeight);
+    draw();
+  });
+  view.shadowMap.needsUpdate = true;
+  draw();
+  document.getElementById('loading').remove();
+  if (params.has('snapshot')) await post(await png(view.domElement), 'viewer-snapshot');
+}
+
+if (LIVE) await live();
+else {
+  await post(grid.map((r) => r.join('')).join('\n') + '\n' + legend, 'city-map-v2.txt');
+  await post(await png(render(new THREE.Vector3(15.5, 0, 15.5), 18)), 'city2-whole');
+  await post(await png(render(new THREE.Vector3(15, 0, 15), 7.5)), 'city2-downtown');
+  await post(await png(render(new THREE.Vector3(25.5, 0, 19.5), 5)), 'city2-neighbourhood');
+  await post(await png(render(new THREE.Vector3(8, 0, 25.5), 4.5)), 'city2-strip');
+}
 document.title = 'done';
 </script>
 </body>
