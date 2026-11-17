@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<script type="importmap">
+  { "imports": { "three": "./three/build/three.module.js", "three/addons/": "./three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<canvas id="out"></canvas>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const names = [
+  'tile-road-straight', 'tile-road-curve', 'tile-road-intersection-t', 'tile-road-end',
+  'tile-mainroad-straight', 'tile-mainroad-curve', 'tile-mainroad-intersection-t', 'tile-mainroad-intersection',
+  'tile-mainroad-road-intersection', 'tile-mainroad-road-intersection-t', 'tile-road-mainroad-intersection', 'tile-road-mainroad-intersection-t',
+  'tile-road-to-mainroad', 'tile-road-to-mainroad-intersection-t', 'tile-roads-mainroad-intersection', 'tile-mainroad-straight-crosswalk',
+];
+const COLS = 4, CELL = 260, LABEL = 30;
+const tex = new THREE.TextureLoader();
+const base = tex.load('textures/base.png');
+base.colorSpace = THREE.SRGBColorSpace; base.flipY = false;
+await new Promise((r) => { const check = () => base.image ? r() : setTimeout(check, 50); check(); });
+const material = new THREE.MeshLambertMaterial({ map: base });
+const loader = new GLTFLoader();
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setSize(CELL, CELL);
+const out = document.getElementById('out');
+out.width = COLS * CELL; out.height = Math.ceil(names.length / COLS) * (CELL + LABEL);
+const ctx = out.getContext('2d');
+ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, out.width, out.height);
+
+for (let i = 0; i < names.length; i++) {
+  const scene = new THREE.Scene();
+  scene.add(new THREE.AmbientLight(0xffffff, 2.5));
+  const m = await new Promise((res) => loader.load(`models/${names[i]}.glb`, (g) => res(g.scene)));
+  m.traverse((o) => { if (o.material) o.material = material; });
+  m.scale.setScalar(1 / 30);
+  const box = new THREE.Box3().setFromObject(m);
+  const c = box.getCenter(new THREE.Vector3());
+  m.position.sub(c);
+  scene.add(m);
+  // Top-down: +x to the right, -z ("top" neighbour in road.js) at the top of the image
+  const cam = new THREE.OrthographicCamera(-0.6, 0.6, 0.6, -0.6, 0.1, 10);
+  cam.position.set(0, 5, 0); cam.up.set(0, 0, -1); cam.lookAt(0, 0, 0);
+  renderer.render(scene, cam);
+  const x = (i % COLS) * CELL, y = Math.floor(i / COLS) * (CELL + LABEL);
+  ctx.drawImage(renderer.domElement, x, y);
+  ctx.fillStyle = '#d00'; ctx.font = 'bold 14px Helvetica';
+  ctx.fillText('top (-z)', x + CELL / 2 - 26, y + 14);
+  ctx.fillText('right (+x)', x + CELL - 72, y + CELL / 2);
+  ctx.fillStyle = '#000'; ctx.font = '14px Helvetica';
+  ctx.fillText(names[i], x + 6, y + CELL + 18);
+}
+const blob = await new Promise((r) => out.toBlob(r, 'image/png'));
+await fetch('save?name=road-pieces', { method: 'POST', body: blob });
+</script>
+</body>
+</html>

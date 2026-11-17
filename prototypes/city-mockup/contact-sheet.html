@@ -1,0 +1,87 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; background: #e9ecef; }
+  canvas#sheet { display: block; }
+</style>
+<script type="importmap">
+  { "imports": { "three": "./three/build/three.module.js", "three/addons/": "./three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<canvas id="sheet"></canvas>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const COLS = 9, CELL = 200, LABEL = 34;
+const groups = await (await fetch('list.json')).json();
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setSize(CELL, CELL);
+renderer.setClearColor(0xcfd8dc, 1);
+
+// Same material set-up as src/scripts/assets/assetManager.js
+const tex = new THREE.TextureLoader();
+const base = tex.load('textures/base.png');
+base.colorSpace = THREE.SRGBColorSpace; base.flipY = false;
+const spec = tex.load('textures/specular.png');
+spec.colorSpace = THREE.SRGBColorSpace; spec.flipY = false;
+
+const loader = new GLTFLoader();
+const load = (name) => new Promise((res) => loader.load(`models/${name}.glb`, (g) => res(g.scene), undefined, () => res(null)));
+await new Promise((r) => { const check = () => base.image ? r() : setTimeout(check, 50); check(); });
+
+for (const [group, names] of Object.entries(groups)) {
+const rows = Math.ceil(names.length / COLS);
+const sheet = document.getElementById('sheet');
+sheet.width = COLS * CELL;
+sheet.height = rows * (CELL + LABEL);
+const ctx = sheet.getContext('2d');
+ctx.fillStyle = '#e9ecef';
+ctx.fillRect(0, 0, sheet.width, sheet.height);
+
+for (let i = 0; i < names.length; i++) {
+  const name = names[i];
+  const scene = new THREE.Scene();
+  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+  const sun = new THREE.DirectionalLight(0xffffff, 2);
+  sun.position.set(-10, 20, 5);
+  scene.add(sun);
+
+  const model = await load(name);
+  let label = name;
+  if (model) {
+    model.traverse((o) => { if (o.material) o.material = new THREE.MeshLambertMaterial({ map: base, specularMap: spec }); });
+    model.scale.setScalar(1 / 30);
+    scene.add(model);
+    const box = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3());
+    const centre = box.getCenter(new THREE.Vector3());
+    const r = Math.max(size.x, size.y, size.z) * 0.85 || 1;
+    const cam = new THREE.OrthographicCamera(-r, r, r, -r, -100, 100);
+    cam.position.copy(centre).add(new THREE.Vector3(1, 0.9, 1).normalize().multiplyScalar(10));
+    cam.lookAt(centre);
+    renderer.render(scene, cam);
+    label = `${name}  ${size.x.toFixed(2)}×${size.z.toFixed(2)}`;
+  } else {
+    renderer.clear();
+  }
+
+  const x = (i % COLS) * CELL, y = Math.floor(i / COLS) * (CELL + LABEL);
+  ctx.drawImage(renderer.domElement, x + 2, y + 2, CELL - 4, CELL - 4);
+  ctx.fillStyle = '#212529';
+  ctx.font = '13px -apple-system, Helvetica, sans-serif';
+  const words = label.split('  ');
+  ctx.fillText(words[0].slice(0, 30), x + 6, y + CELL + 12);
+  if (words[1]) { ctx.fillStyle = '#6c757d'; ctx.fillText(words[1] + ' tiles', x + 6, y + CELL + 27); }
+}
+const blob = await new Promise((r) => sheet.toBlob(r, 'image/png'));
+await fetch(`save?name=${group}`, { method: 'POST', body: blob });
+}
+document.title = 'done';
+</script>
+</body>
+</html>
