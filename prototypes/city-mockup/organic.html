@@ -1,0 +1,446 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<script type="importmap">
+  { "imports": { "three": "./three/build/three.module.js", "three/addons/": "./three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: linear-gradient(0deg, #3a5177, #81b1e0); font: 14px -apple-system, Helvetica, sans-serif; color: #fff; }
+  #loading { position: fixed; inset: 0; display: grid; place-items: center; font-size: 22px; }
+  #help { position: fixed; left: 16px; bottom: 16px; opacity: 0.85; }
+</style>
+<div id="loading">Building the city…</div>
+<div id="help">Drag to pan · Right-drag to rotate · Scroll to zoom</div>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+const W = 1800, H = 1150, DEG = Math.PI / 180;
+const params = new URLSearchParams(location.search);
+const LIVE = params.has('live');
+
+// ---------------------------------------------------------------- real-world data → scene units
+// One unit is 32 m, which puts the kit's houses and shopfronts at real-world size
+const M = 32;
+const LAT0 = 35.6870, LON0 = -105.9378;            // Santa Fe Plaza
+const toXZ = ({ lat, lon }) => [(lon - LON0) * 111320 * Math.cos(LAT0 * DEG) / M, -(lat - LAT0) * 111320 / M];
+const osm = await (await fetch('osm/santafe.json')).json();
+const ways = osm.elements.filter((e) => e.type === 'way' && e.geometry).map((e) => ({ tags: e.tags ?? {}, pts: e.geometry.map(toXZ) }));
+const HALF_X = 0.0075 * 111320 * Math.cos(LAT0 * DEG) / M, HALF_Z = 0.0055 * 111320 / M;
+
+// ---------------------------------------------------------------- palette
+const tex = new THREE.TextureLoader();
+const base = tex.load('textures/base.png'); base.colorSpace = THREE.SRGBColorSpace; base.flipY = false;
+const spec = tex.load('textures/specular.png'); spec.colorSpace = THREE.SRGBColorSpace; spec.flipY = false;
+await new Promise((r) => { const check = () => base.image ? r() : setTimeout(check, 50); check(); });
+const material = new THREE.MeshLambertMaterial({ map: base, specularMap: spec });
+// The centre of one 128px swatch in the 8×8 palette, by column and row
+const swatch = (c, r) => [(c + 0.5) / 8, (r + 0.5) / 8];
+const SW = {
+  ground: swatch(7, 4), park: swatch(4, 4), lawn: swatch(3, 4), water: swatch(3, 5), asphalt: swatch(1, 2), parking: swatch(2, 2),
+  pavement: swatch(4, 2), paving: swatch(5, 1), line: swatch(5, 3), plinth: swatch(6, 2), plinthWarm: swatch(6, 1), dirt: swatch(1, 1),
+};
+
+// ---------------------------------------------------------------- flat geometry: ground, land use, roads
+const flat = { pos: [], uv: [] };
+// Wound so every triangle faces up (+y); a face shown from below is lit by ambient light only
+const tri = (a, b, c, y, s) => {
+  if ((b[1] - a[1]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[1] - a[1]) < 0) [b, c] = [c, b];
+  for (const p of [a, b, c]) { flat.pos.push(p[0], y, p[1]); flat.uv.push(...s); }
+};
+function polygon(pts, y, s) {
+  const ring = pts.slice(0, -1).map(([x, z]) => new THREE.Vector2(x, z));
+  if (ring.length < 3) return;
+  for (const [a, b, c] of THREE.ShapeUtils.triangulateShape(ring, [])) tri(pts[a], pts[b], pts[c], y, s);
+}
+function ribbon(pts, width, y, s) {
+  const h = width / 2, L = [], R = [];
+  const normal = (q0, q1) => { const dx = q1[0] - q0[0], dz = q1[1] - q0[1], l = Math.hypot(dx, dz) || 1; return [-dz / l, dx / l]; };
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i], a = pts[i - 1], b = pts[i + 1];
+    let n;
+    if (a && b) {
+      const n1 = normal(a, p), n2 = normal(p, b);
+      let mx = n1[0] + n2[0], mz = n1[1] + n2[1];
+      const ml = Math.hypot(mx, mz) || 1; mx /= ml; mz /= ml;
+      const k = 1 / Math.max(mx * n1[0] + mz * n1[1], 0.5);   // mitred corners, capped on sharp turns
+      n = [mx * k, mz * k];
+    } else n = a ? normal(a, p) : normal(p, b);
+    L.push([p[0] + n[0] * h, p[1] + n[1] * h]); R.push([p[0] - n[0] * h, p[1] - n[1] * h]);
+  }
+  for (let i = 0; i < pts.length - 1; i++) { tri(L[i], R[i], L[i + 1], y, s); tri(R[i], R[i + 1], L[i + 1], y, s); }
+}
+function disc(p, r, y, s, n = 12) {
+  for (let k = 0; k < n; k++) {
+    const a0 = (k / n) * Math.PI * 2, a1 = ((k + 1) / n) * Math.PI * 2;
+    tri(p, [p[0] + Math.cos(a1) * r, p[1] + Math.sin(a1) * r], [p[0] + Math.cos(a0) * r, p[1] + Math.sin(a0) * r], y, s);
+  }
+}
+function dashes(pts, y, s, dash = 0.1, gap = 0.12, width = 0.012) {
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [ax, az] = pts[i], [bx, bz] = pts[i + 1], len = Math.hypot(bx - ax, bz - az);
+    for (let t = 0; t + dash < len; t += dash + gap) {
+      const p0 = [ax + (bx - ax) * t / len, az + (bz - az) * t / len], p1 = [ax + (bx - ax) * (t + dash) / len, az + (bz - az) * (t + dash) / len];
+      ribbon([p0, p1], width, y, s);
+    }
+  }
+}
+
+// Road widths in units (32 m): carriageway, and with pavements
+const ROADS = {
+  primary: [0.46, 0.62], secondary: [0.42, 0.58], tertiary: [0.34, 0.48], unclassified: [0.26, 0.38], residential: [0.26, 0.38],
+  living_street: [0.22, 0.32], pedestrian: [0.2, 0], service: [0.13, 0],
+};
+const Y = { ground: 0, land: 0.004, parking: 0.005, water: 0.006, pavement: 0.007, road: 0.009, line: 0.011 };
+
+// OpenStreetMap returns whole ways, so lines and areas are clipped to the edge of the map
+const inMap = ([x, z]) => Math.abs(x) <= HALF_X && Math.abs(z) <= HALF_Z;
+function clipLine(pts) {
+  const out = [];
+  let cur = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    let [x0, z0] = pts[i], [x1, z1] = pts[i + 1], t0 = 0, t1 = 1;
+    const dx = x1 - x0, dz = z1 - z0;
+    const ok = [[-dx, x0 + HALF_X], [dx, HALF_X - x0], [-dz, z0 + HALF_Z], [dz, HALF_Z - z0]].every(([p, q]) => {
+      if (p === 0) return q >= 0;
+      const t = q / p;
+      if (p < 0) { if (t > t1) return false; t0 = Math.max(t0, t); } else { if (t < t0) return false; t1 = Math.min(t1, t); }
+      return true;
+    });
+    if (!ok) { if (cur.length > 1) out.push(cur); cur = []; continue; }
+    const a = [x0 + dx * t0, z0 + dz * t0], b = [x0 + dx * t1, z0 + dz * t1];
+    if (!cur.length) cur.push(a);
+    cur.push(b);
+    if (t1 < 1) { out.push(cur); cur = []; }
+  }
+  if (cur.length > 1) out.push(cur);
+  return out;
+}
+function clipPolygon(pts) {
+  let ring = pts.slice(0, -1);
+  for (const [axis, sign, lim] of [[0, 1, HALF_X], [0, -1, HALF_X], [1, 1, HALF_Z], [1, -1, HALF_Z]]) {
+    const inside = (p) => sign * p[axis] <= lim, next = [];
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i], b = ring[(i + 1) % ring.length];
+      if (inside(a)) next.push(a);
+      if (inside(a) !== inside(b)) { const t = (sign * lim - a[axis]) / (b[axis] - a[axis]); next.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]); }
+    }
+    ring = next;
+    if (!ring.length) return null;
+  }
+  return ring.length >= 3 ? [...ring, ring[0]] : null;
+}
+const isClosed = (w) => w.pts.length > 3 && w.pts[0][0] === w.pts.at(-1)[0] && w.pts[0][1] === w.pts.at(-1)[1];
+const lines = (filter) => ways.filter(filter).flatMap((w) => clipLine(w.pts).map((pts) => ({ tags: w.tags, pts })));
+const areas = (filter) => ways.filter((w) => isClosed(w) && filter(w)).map((w) => ({ tags: w.tags, pts: clipPolygon(w.pts) })).filter((w) => w.pts);
+const roads = lines((w) => ROADS[w.tags.highway]);
+const parks = areas((w) => ['park', 'garden', 'pitch', 'playground'].includes(w.tags.leisure) || ['grass', 'recreation_ground', 'cemetery'].includes(w.tags.landuse));
+const parkingLots = areas((w) => w.tags.amenity === 'parking');
+const rivers = lines((w) => w.tags.waterway);
+const centroid = (pts) => { const r = pts.slice(0, -1); return [r.reduce((s, p) => s + p[0], 0) / r.length, r.reduce((s, p) => s + p[1], 0) / r.length]; };
+// The plaza is the small park nearest the centre; its bandstand makes way for the fountain
+const plaza = parks.filter((p) => !p.tags.landuse).sort((a, b) => Math.hypot(...centroid(a.pts)) - Math.hypot(...centroid(b.pts)))[0];
+const buildingsRaw = ways.filter((w) => w.tags.building && isClosed(w) && inMap(centroid(w.pts)) && !(plaza && insidePoly(centroid(w.pts), plaza.pts)));
+function insidePoly(p, pts) {
+  let r = false;
+  for (let i = 0, j = pts.length - 2; i < pts.length - 1; j = i++) {
+    const [xi, zi] = pts[i], [xj, zj] = pts[j];
+    if ((zi > p[1]) !== (zj > p[1]) && p[0] < (xj - xi) * (p[1] - zi) / (zj - zi) + xi) r = !r;
+  }
+  return r;
+}
+
+// Ground
+polygon([[-HALF_X, -HALF_Z], [HALF_X, -HALF_Z], [HALF_X, HALF_Z], [-HALF_X, HALF_Z], [-HALF_X, -HALF_Z]], Y.ground, SW.ground);
+for (const r of rivers) { ribbon(r.pts, r.tags.waterway === 'river' ? 0.7 : 0.4, Y.land, SW.lawn); ribbon(r.pts, r.tags.waterway === 'river' ? 0.12 : 0.07, Y.water, SW.water); }
+for (const p of parks) polygon(p.pts, Y.land, p.tags.leisure === 'pitch' ? SW.lawn : SW.park);
+for (const p of parkingLots) polygon(p.pts, Y.parking, SW.parking);
+// Round ends join roads at junctions, except where a road runs off the edge of the map
+const onEdge = ([x, z]) => Math.abs(Math.abs(x) - HALF_X) < 1e-6 || Math.abs(Math.abs(z) - HALF_Z) < 1e-6;
+const caps = (pts, r, y, s) => { for (const p of [pts[0], pts.at(-1)]) if (!onEdge(p)) disc(p, r, y, s); };
+for (const r of roads) {
+  const [w, withPavement] = ROADS[r.tags.highway];
+  if (withPavement) { ribbon(r.pts, withPavement, Y.pavement, SW.pavement); caps(r.pts, withPavement / 2, Y.pavement, SW.pavement); }
+  const s = r.tags.highway === 'pedestrian' ? SW.paving : r.tags.highway === 'service' ? SW.parking : SW.asphalt;
+  const y = r.tags.highway === 'service' ? Y.parking + 0.0005 : Y.road;
+  ribbon(r.pts, w, y, s); caps(r.pts, w / 2, y, s);
+  if (['primary', 'secondary', 'tertiary'].includes(r.tags.highway)) dashes(r.pts, Y.line, SW.line);
+}
+
+// ---------------------------------------------------------------- assets
+const loader = new GLTFLoader();
+const cache = {};
+async function model(name) {
+  cache[name] ??= await new Promise((res, rej) => loader.load(`models/${name}.glb`, (g) => {
+    g.scene.traverse((o) => { if (o.isMesh) { o.material = material; o.castShadow = true; o.receiveShadow = true; } });
+    res(g.scene);
+  }, undefined, rej));
+  return cache[name].clone();
+}
+const city = new THREE.Group();
+// Place a model centred on (x, z), standing on y, facing `rot` radians (its front is +z at 0), scaled by s
+async function place(name, x, z, { rot = 0, s = 1, y = 0 } = {}) {
+  const m = await model(name);
+  m.scale.setScalar(s / 30);
+  m.rotation.y = rot;
+  const box = new THREE.Box3().setFromObject(m), c = box.getCenter(new THREE.Vector3());
+  m.position.set(x - c.x, y - box.min.y, z - c.z);
+  city.add(m);
+  return m;
+}
+const sizes = {};
+async function sizeOf(name) {           // footprint at scale 1, unrotated: [width along x, depth along z]
+  if (!sizes[name]) { const m = await model(name); m.scale.setScalar(1 / 30); const s = new THREE.Box3().setFromObject(m).getSize(new THREE.Vector3()); sizes[name] = [s.x, s.z]; }
+  return sizes[name];
+}
+
+let seed = 7;
+const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+const pick = (list) => list[Math.floor(rand() * list.length)];
+
+// ---------------------------------------------------------------- geometry helpers
+const area = (pts) => { let a = 0; for (let i = 0; i < pts.length - 1; i++) a += pts[i][0] * pts[i + 1][1] - pts[i + 1][0] * pts[i][1]; return Math.abs(a) / 2; };
+function minRect(pts) {
+  const ring = pts.slice(0, -1);
+  let best = null;
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i], b = ring[(i + 1) % ring.length], ang = Math.atan2(b[1] - a[1], b[0] - a[0]), c = Math.cos(ang), s = Math.sin(ang);
+    let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+    for (const [x, z] of ring) { const u = x * c + z * s, v = -x * s + z * c; u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v); }
+    const ar = (u1 - u0) * (v1 - v0);
+    if (!best || ar < best.ar) best = { ar, c, s, w: u1 - u0, d: v1 - v0, cu: (u0 + u1) / 2, cv: (v0 + v1) / 2 };
+  }
+  return { u: [best.c, best.s], v: [-best.s, best.c], w: best.w, d: best.d, cx: best.cu * best.c - best.cv * best.s, cz: best.cu * best.s + best.cv * best.c };
+}
+const inside = insidePoly;
+// Street segments buildings can face (not alleys or car park aisles)
+const streetSegs = [];
+for (const r of roads) if (!['service', 'pedestrian'].includes(r.tags.highway)) for (let i = 0; i < r.pts.length - 1; i++) streetSegs.push([r.pts[i], r.pts[i + 1], r.tags.highway]);
+function nearestStreet(p) {
+  let best = null;
+  for (const [a, b, kind] of streetSegs) {
+    const dx = b[0] - a[0], dz = b[1] - a[1], l2 = dx * dx + dz * dz || 1;
+    const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / l2));
+    const q = [a[0] + dx * t, a[1] + dz * t], d = Math.hypot(p[0] - q[0], p[1] - q[1]);
+    if (!best || d < best.d) best = { d, q, kind, dir: [dx, dz] };
+  }
+  return best;
+}
+// A grid index of building footprints, so trees and cars can avoid them
+const cell = (x, z) => `${Math.floor(x)},${Math.floor(z)}`;
+const footIndex = new Map();
+const inBuilding = (p) => (footIndex.get(cell(p[0], p[1])) ?? []).some((pts) => inside(p, pts));
+
+// ---------------------------------------------------------------- buildings
+const SKIP = new Set(['roof', 'carport', 'no', 'construction', 'greenhouse', 'shed', 'hut']);
+function chooseModels(t, m2, core) {
+  const b = t.building, a = t.amenity;
+  if (['church', 'cathedral', 'chapel', 'religious'].includes(b) || a === 'place_of_worship') return ['building-museum'];
+  if (b === 'school' || a === 'school') return ['building-school'];
+  if (b === 'hotel' || t.tourism === 'hotel') return m2 > 1800 ? ['building-hotel'] : ['building-block-5floor-front', 'building-block-4floor-front', 'building-block-5floor'];
+  if (b === 'parking') return ['industry-warehouse'];
+  if (a === 'bank') return ['building-bank'];
+  if (a === 'townhall' || b === 'public') return ['building-museum'];
+  if (core) {
+    if (m2 < 260) return ['building-cafe', 'building-restaurant', 'building-block-4floor-short', 'building-block-5floor-short'];
+    if (m2 < 750) return ['building-block-4floor-front', 'building-block-4floor-short', 'building-restaurant', 'building-cafe', 'building-post', 'building-block-5floor-short'];
+    if (m2 < 2200) return ['building-block-5floor', 'building-block-5floor-front', 'building-cinema', 'building-casino', 'building-bank'];
+    return ['building-hotel', 'building-mall', 'building-museum', 'building-block-5floor'];
+  }
+  if (m2 < 130) return ['building-cabin-small', 'building-house-block-old', 'building-house-block'];
+  if (m2 < 300) return ['building-house-family-small', 'building-house-modern', 'building-house-block-big', 'building-house-family-large', 'building-cabin-big'];
+  if (m2 < 800) return ['building-house-modern-big', 'building-house-family-large', 'building-block-4floor-short', 'building-restaurant'];
+  if (m2 < 2500) return ['building-block-4floor-front', 'building-school', 'industry-building', 'building-mall'];
+  return ['industry-warehouse', 'building-mall', 'industry-factory-hall'];
+}
+
+const plinths = [];
+const houses = [];
+async function buildings() {
+  for (const bw of buildingsRaw) {
+    if (SKIP.has(bw.tags.building)) continue;
+    const m2 = area(bw.pts) * M * M;
+    if (m2 < 50) continue;
+    const r = minRect(bw.pts), centre = [r.cx, r.cz];
+    const core = Math.hypot(centre[0], centre[1]) * M < 420;
+    // The footprint as a raised plinth: the real building's shape, with an edge
+    const shape = new THREE.Shape(bw.pts.slice(0, -1).map(([x, z]) => new THREE.Vector2(x, -z)));
+    const g = new THREE.ExtrudeGeometry(shape, { depth: 0.03, bevelEnabled: false });
+    g.rotateX(-Math.PI / 2);
+    const uv = g.attributes.uv; const sw = core ? SW.plinthWarm : SW.plinth;
+    for (let i = 0; i < uv.count; i++) uv.setXY(i, sw[0], sw[1]);
+    plinths.push(g);
+    for (let i = 0; i < bw.pts.length - 1; i++) { const k = cell(...bw.pts[i]); if (!footIndex.has(k)) footIndex.set(k, []); footIndex.get(k).push(bw.pts); }
+    const kc = cell(...centre); if (!footIndex.has(kc)) footIndex.set(kc, []); footIndex.get(kc).push(bw.pts);
+
+    // Face the nearest street, snapped to the footprint's own axes
+    const st = nearestStreet(centre);
+    let f = st ? [st.q[0] - centre[0], st.q[1] - centre[1]] : [0, 1];
+    const fu = f[0] * r.u[0] + f[1] * r.u[1], fv = f[0] * r.v[0] + f[1] * r.v[1];
+    const alongU = Math.abs(fu) > Math.abs(fv);
+    f = alongU ? r.u.map((c) => c * Math.sign(fu)) : r.v.map((c) => c * Math.sign(fv));
+    const frontage = alongU ? r.d : r.w, depth = alongU ? r.w : r.d;
+    const side = alongU ? r.v : r.u;
+    const rot = Math.atan2(f[0], f[1]);
+
+    const name = pick(chooseModels(bw.tags, m2, core));
+    const [mw, md] = await sizeOf(name);
+    const s = Math.max(0.55, Math.min(1.7, Math.min(frontage * 0.92 / mw, depth * 0.92 / md)));
+    const count = Math.max(1, Math.min(4, Math.floor(frontage * 0.95 / (mw * s))));
+    for (let i = 0; i < count; i++) {
+      const off = (i - (count - 1) / 2) * (frontage / count);
+      const n = i === 0 ? name : pick(chooseModels(bw.tags, m2 / count, core));
+      await place(n, centre[0] + side[0] * off, centre[1] + side[1] * off, { rot, s: count > 1 ? Math.min(s, frontage / count * 0.92 / (await sizeOf(n))[0]) : s, y: 0.03 });
+    }
+    if (!core && m2 < 800) houses.push({ centre, f, depth });
+  }
+  const merged = mergeGeometries(plinths);
+  const mesh = new THREE.Mesh(merged, material); mesh.castShadow = true; mesh.receiveShadow = true;
+  city.add(mesh);
+}
+
+// ---------------------------------------------------------------- trees, cars, the fountain
+const TREES = ['tree-oak', 'tree-lime', 'tree-round', 'tree-birch', 'tree-elipse', 'tree-beech', 'tree-poplar'];
+const CARS = ['car-passenger', 'car-taxi', 'car-hippie-van', 'car-veteran', 'car-passenger-race', 'truck', 'car-police'];
+function randomIn(pts) {
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (const [x, z] of pts) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); }
+  for (let k = 0; k < 30; k++) { const p = [x0 + rand() * (x1 - x0), z0 + rand() * (z1 - z0)]; if (inside(p, pts)) return p; }
+  return null;
+}
+async function dressing() {
+  // Trees in parks and gardens
+  for (const p of parks) {
+    const n = Math.min(40, Math.round(area(p.pts) * 10));
+    for (let i = 0; i < n; i++) { const q = randomIn(p.pts); if (q && !inBuilding(q)) await place(pick(TREES), q[0], q[1], { s: 0.9 + rand() * 0.5, rot: rand() * 6.28 }); }
+  }
+  // Trees along the river
+  for (const r of rivers) for (let i = 0; i < r.pts.length - 1; i++) {
+    const [a, b] = [r.pts[i], r.pts[i + 1]], len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    for (let t = 0; t < len; t += 0.18) {
+      const n = [-(b[1] - a[1]) / len, (b[0] - a[0]) / len], side = rand() < 0.5 ? -1 : 1, o = 0.12 + rand() * 0.18;
+      const q = [a[0] + (b[0] - a[0]) * t / len + n[0] * o * side, a[1] + (b[1] - a[1]) * t / len + n[1] * o * side];
+      if (!inBuilding(q)) await place(pick(TREES), q[0], q[1], { s: 0.9 + rand() * 0.6, rot: rand() * 6.28 });
+    }
+  }
+  // Back-garden trees behind houses
+  for (const h of houses) for (let i = 0; i < 2; i++) {
+    if (rand() < 0.35) continue;
+    const back = h.depth / 2 + 0.08 + rand() * 0.15, sideways = (rand() - 0.5) * 0.4;
+    const q = [h.centre[0] - h.f[0] * back - h.f[1] * sideways, h.centre[1] - h.f[1] * back + h.f[0] * sideways];
+    if (!inBuilding(q)) await place(pick(TREES), q[0], q[1], { s: 0.9 + rand() * 0.5, rot: rand() * 6.28 });
+  }
+  // Cars parked in car parks
+  for (const p of parkingLots) {
+    const n = Math.min(14, Math.round(area(p.pts) * 14));
+    const r = minRect(p.pts), rot = Math.atan2(r.v[0], r.v[1]);
+    for (let i = 0; i < n; i++) { const q = randomIn(p.pts); if (q && !inBuilding(q)) await place(pick(CARS), q[0], q[1], { rot, y: Y.parking }); }
+  }
+  // Traffic on the bigger roads
+  for (const r of roads) {
+    if (!['secondary', 'tertiary', 'residential'].includes(r.tags.highway)) continue;
+    for (let i = 0; i < r.pts.length - 1; i++) {
+      const [a, b] = [r.pts[i], r.pts[i + 1]], len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (rand() > len * (r.tags.highway === 'residential' ? 0.25 : 0.6)) continue;
+      const t = rand(), lane = (rand() < 0.5 ? -1 : 1) * ROADS[r.tags.highway][0] * 0.22, n = [-(b[1] - a[1]) / len, (b[0] - a[0]) / len];
+      const rot = Math.atan2(b[0] - a[0], b[1] - a[1]) + (lane < 0 ? Math.PI : 0);
+      await place(pick(CARS.concat(['bus-passenger'])), a[0] + (b[0] - a[0]) * t + n[0] * lane, a[1] + (b[1] - a[1]) * t + n[1] * lane, { rot, y: Y.road });
+    }
+  }
+  // The fountain in the middle of the plaza
+  const pc = plaza ? minRect(plaza.pts) : { cx: 0, cz: 0 };
+  await place('fountain', pc.cx, pc.cz, { s: 2.6, y: Y.land });
+  for (let k = 0; k < 4; k++) await place('bench-old', pc.cx + Math.sin(k * Math.PI / 2) * 0.3, pc.cz + Math.cos(k * Math.PI / 2) * 0.3, { rot: k * Math.PI / 2 + Math.PI, y: Y.land });
+  return [pc.cx, pc.cz];
+}
+
+await buildings();
+const plazaCentre = await dressing();
+
+// The flat layers, then a base under the whole map with earth showing at its edges
+{
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(flat.pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(flat.uv, 2));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(flat.pos.map((_, i) => (i % 3 === 1 ? 1 : 0)), 3));
+  const mesh = new THREE.Mesh(g, material); mesh.receiveShadow = true;
+  city.add(mesh);
+  const slab = new THREE.Mesh(new THREE.BoxGeometry(HALF_X * 2, 0.3, HALF_Z * 2), new THREE.MeshLambertMaterial({ color: 0x5b4636 }));
+  slab.position.y = -0.152;
+  city.add(slab);
+}
+
+// ---------------------------------------------------------------- rendering
+function lights(scene, centre, half) {
+  const sun = new THREE.DirectionalLight(0xffffff, 2);
+  sun.position.copy(centre).add(new THREE.Vector3(-10, 20, 0).multiplyScalar(Math.max(1, half / 6)));
+  sun.target.position.copy(centre);
+  sun.castShadow = true;
+  const s = half * 1.8;
+  Object.assign(sun.shadow.camera, { left: -s, right: s, top: s, bottom: -s, near: 1, far: 500 });
+  sun.shadow.mapSize.set(4096, 4096);
+  sun.shadow.normalBias = 0.01;
+  scene.add(sun, sun.target, new THREE.AmbientLight(0xffffff, 0.5));
+}
+function camera(centre, half, aspect) {
+  const cam = new THREE.OrthographicCamera(-half * aspect, half * aspect, half, -half, 1, 1000);
+  cam.position.set(centre.x + 100 * Math.sin(225 * DEG) * Math.cos(45 * DEG), 100 * Math.sin(45 * DEG), centre.z + 100 * Math.cos(225 * DEG) * Math.cos(45 * DEG));
+  cam.lookAt(centre);
+  return cam;
+}
+async function post(body, name) { await fetch(`save?name=${name}`, { method: 'POST', body }); }
+const png = (canvas) => new Promise((r) => canvas.toBlob(r, 'image/png'));
+
+if (LIVE) {
+  const { OrbitControls } = await import('three/addons/controls/OrbitControls.js');
+  const view = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  view.setPixelRatio(Math.min(devicePixelRatio, 2));
+  view.setSize(innerWidth, innerHeight);
+  view.setClearColor(0x000000, 0);
+  view.shadowMap.enabled = true; view.shadowMap.type = THREE.PCFShadowMap; view.shadowMap.autoUpdate = false;
+  document.body.appendChild(view.domElement);
+  const scene = new THREE.Scene(); scene.add(city);
+  const centre = new THREE.Vector3(0, 0, 0), half = 20;
+  lights(scene, centre, half);
+  const cam = camera(centre, half, innerWidth / innerHeight);
+  const controls = new OrbitControls(cam, view.domElement);
+  controls.target.copy(centre);
+  controls.minPolarAngle = controls.maxPolarAngle = 45 * DEG;
+  controls.minZoom = 0.8; controls.maxZoom = 16;
+  controls.screenSpacePanning = false;
+  controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+  controls.update();
+  const draw = () => view.render(scene, cam);
+  controls.addEventListener('change', draw);
+  addEventListener('resize', () => { const a = innerWidth / innerHeight; Object.assign(cam, { left: -half * a, right: half * a }); cam.updateProjectionMatrix(); view.setSize(innerWidth, innerHeight); draw(); });
+  view.shadowMap.needsUpdate = true;
+  draw();
+  document.getElementById('loading').remove();
+  if (params.has('snapshot')) await post(await png(view.domElement), 'organic-live');
+} else {
+  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, alpha: true });
+  renderer.setSize(W, H); renderer.setClearColor(0x000000, 0);
+  renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFShadowMap;
+  const shot = async (centre, half, name) => {
+    const scene = new THREE.Scene(); scene.add(city);
+    lights(scene, centre, half);
+    renderer.render(scene, camera(centre, half, W / H));
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const ctx = c.getContext('2d');
+    const grad = ctx.createLinearGradient(0, H, 0, 0); grad.addColorStop(0, '#3a5177'); grad.addColorStop(1, '#81b1e0');
+    ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H); ctx.drawImage(renderer.domElement, 0, 0);
+    await post(await png(c), name);
+  };
+  await shot(new THREE.Vector3(0, 0, 0), 20, 'organic-whole');
+  await shot(new THREE.Vector3(1.5, 0, 0.5), 7, 'organic-downtown');
+  await shot(new THREE.Vector3(plazaCentre[0], 0, plazaCentre[1]), 2.6, 'organic-plaza');
+  await shot(new THREE.Vector3(-9, 0, 6), 5, 'organic-neighbourhood');
+}
+document.title = 'done';
+</script>
+</body>
+</html>

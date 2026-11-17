@@ -14,6 +14,7 @@ These are throwaway pages that render city ideas with the game's own models, pal
 | `mock2.html` | A town square with a fountain, lot edges and a lighting comparison |
 | `city.html` | City v1: a 32×32 town built from a text map |
 | `city2.html` | City v2: several buildings per lot, less downtown parking, Chinatown, strip malls with parking in front |
+| `organic.html` | The city without a grid, built from real Santa Fe streets, building footprints, parks and river (`osm/santafe.json`) |
 | `maps/` | The text maps behind v1 and v2. One character per tile, with the legend at the bottom |
 | `renders/` | The renders from each page, as JPEG |
 | `references/` | OpenStreetMap views of Oxford (Mississippi), Savannah and Santa Fe, core and whole town |
@@ -22,9 +23,17 @@ These are throwaway pages that render city ideas with the game's own models, pal
 
 `three`, `models` and `textures` are links into `node_modules` and `src/public`, so run `npm install` first.
 
-## How to run a page
+## Explore a city in the browser
 
-The pages draw off-screen and post their images back to the little server, which saves them and stops.
+```bash
+npm run prototype
+```
+
+Then open http://127.0.0.1:3001/organic.html?live for the Santa Fe city, or http://127.0.0.1:3001/city2.html?live for the grid city. Drag to pan, right-drag to rotate, scroll to zoom.
+
+## How to render images
+
+Without `?live`, the pages draw off-screen and post their images back to the little server, which saves them and stops.
 
 ```bash
 cd prototypes/city-mockup
@@ -35,7 +44,7 @@ python3 tools/sheet_server.py . out 5 600 &      # expect 5 images, give up afte
   http://127.0.0.1:8765/city2.html
 ```
 
-The number of images each page posts: `contact-sheet` 5, `roads` 1, `mock` 4, `mock2` 4, `city` 5, `city2` 5. Stop Chrome once the server prints `done`.
+The number of images each page posts: `contact-sheet` 5, `roads` 1, `mock` 4, `mock2` 4, `city` 5, `city2` 5, `organic` 4. Stop Chrome once the server prints `done`.
 
 ## What we learnt
 
@@ -51,6 +60,11 @@ The number of images each page posts: `contact-sheet` 5, `roads` 1, `mock` 4, `m
 
   Small props only show when you zoom in.
 - **The American small-city pattern** (references): a small square at the heart, a compact core, a loop road, older grid neighbourhoods, a shopping strip along a main road, and a highway bypass. The courthouse square is the layout the mock-ups ended up with.
+- **The grid was the problem.** The player never places a building, so the city doesn't need tiles. `organic.html` drops them:
+  - Streets are drawn as ribbons along real street lines, in palette colours.
+  - Every real footprint becomes a raised plinth with a kit building on it, facing its street.
+
+  It reads as a real town. What's still off: kit buildings are smaller than real footprints, and the brick mid-rise doesn't match Santa Fe's low adobe.
 
 ## Open threads
 
@@ -59,4 +73,4 @@ The number of images each page posts: `contact-sheet` 5, `roads` 1, `mock` 4, `m
 - **2.4: our own assets** for the crisis infrastructure and people.
 - **Multi-tile buildings** (the stadium and train station) aren't supported by the engine.
 
-Map screenshots in `references/` © OpenStreetMap contributors.
+Map screenshots in `references/` and the data in `osm/santafe.json` © OpenStreetMap contributors, available under the Open Database Licence.

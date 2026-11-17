@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 3000",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "prototype": "echo 'City prototype: http://127.0.0.1:3001/city2.html?live' && python3 -m http.server 3001 --bind 127.0.0.1 --directory prototypes/city-mockup"
   },
   "devDependencies": {
     "vite": "^4.4.5"
