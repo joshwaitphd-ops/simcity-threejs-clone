@@ -60,13 +60,23 @@ Then, on top of plain WFC:
 - **Soft size cap** on parks, and **one of each landmark** (town hall, bank, school, fire station, police, hospital, data centre).
 - **Restarts:** a plan that contradicts itself, or whose streets don't all connect, is dropped. Of 6 working plans, the one with the fewest defects is kept. A 25×25 town takes 0.1–2.5 s.
 
-**Drawing it.** A gentle, smooth warp bends the whole grid, so streets curve a little while lots keep their shape (`?warp=0` for straight streets). Streets are traced from junction to junction and drawn as textured ribbons, with rounded bends and round junctions. Downtown streets get pavements wall to wall. Lots get a raised base sized to the cell, and buildings in a row along their front, using city2's lot rules. Every house lot holds 2 houses, so plots are about 16 m wide.
+**Drawing it.** A gentle, smooth warp bends the whole grid, so streets curve a little while lots keep their shape (`?warp=0` for straight streets). Streets are traced from junction to junction and drawn as textured ribbons, with rounded bends and round junctions. Downtown streets get pavements wall to wall. Repeated points where two curves meet are dropped, as they used to double the street's width there and leave spikes. Lots get a raised base sized to the cell, and buildings in a row along their front, using city2's lot rules. Every house lot holds 2 houses, so plots are about 16 m wide.
 
-**In the browser** (`?live`): a minimap of the plan, with a tick on each lot's front; **Watch it build**, which raises the lots in the order the solver decided them; **New town**; straight or bent streets; and the day/night cycle. `?size=` changes the grid (odd numbers), and `?ground=`, `?buildings=` and `?texscale=` work as in `organic.html`.
+**Park paths** go where people would walk. Each park (park cells side by side) gets entrances only where a street runs along its edge, as far apart as possible, then a path from each to a hub near its middle:
+
+- 2 entrances: one path through, street to street, with a bench beside it
+- 1, or 3 and more: the paths meet at a small round seating area with benches
+- none: no paths (a park enclosed by lots stays plain grass)
+
+Paths take the most direct line that stays in the park, and curve round corners. An entrance whose path would wander round a corner is left out if there are others. The courthouse square gets paths from the middle of each side and each corner to the fountain. Trees keep off paths.
+
+**In the browser** (`?live`): a minimap of the plan, with a tick on each lot's front; **Watch it build**, which raises the lots in the order the solver decided them; **New town**; and the day/night cycle.
+
+For checking: `?debug` logs sharp corners in streets, street ends that aren't at a junction, and how many park paths there are. Without `?live`, `?shot=x,z,half` renders one view centred on plan cell (x, z). `?size=` changes the grid (odd numbers), and `?ground=`, `?buildings=` and `?texscale=` work as in `organic.html`.
 
 To try the planner without a browser: `node -e "import('./lib/townPlan.js').then(({ planTown }) => console.log(planTown({ seed: 5 }).map))"`
 
-Renders: `renders/town-seed<n>-*.jpg`, and `renders/town-seed1-map.png` for the plan.
+Renders: `renders/town-seed<n>-*.jpg`, and `renders/town-seed1-map.png` for the plan. `town` posts 1 image with `?shot=`.
 
 ## Ground and building detail
 

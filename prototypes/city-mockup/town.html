@@ -34,7 +34,6 @@
   <div class="row">
     <b>Town</b><span id="seedLabel" class="grow"></span>
     <button id="replay" type="button">Watch it build</button>
-    <button id="warp" type="button"></button>
     <button id="new" type="button">New town</button>
   </div>
   <div class="row">
@@ -133,6 +132,10 @@ function makeFlat() {
     },
     // A strip along a line, slabs laid along each segment
     ribbon(pts, width, y, s, kind = SURF.none) {
+      // Repeated points (where two curves meet) would read as a sharp corner and double the
+      // strip's width there, so they're dropped
+      pts = pts.filter((p, i) => i === 0 || Math.hypot(p[0] - pts[i - 1][0], p[1] - pts[i - 1][1]) > 1e-6);
+      if (pts.length < 2) return;
       const h = width / 2, L = [], R = [];
       const normal = (q0, q1) => { const [dx, dz] = norm(sub(q1, q0)); return [-dz, dx]; };
       for (let i = 0; i < pts.length; i++) {
@@ -289,7 +292,8 @@ const streets = [];
     dense.push(pts.at(-1));
     const mid = pts[Math.floor(pts.length / 2)];
     const downtown = zone(mid) < DOWNTOWN;
-    streets.push({ cls, pts: dense.map(warp), startNode: true, endNode, downtown, ...ROAD[cls], pavement: downtown ? 0.9 : ROAD[cls].pavement });
+    // plan: the line before the warp, for working out where park paths meet the street
+    streets.push({ cls, plan: dense, pts: dense.map(warp), startNode: true, endNode, downtown, ...ROAD[cls], pavement: downtown ? 0.9 : ROAD[cls].pavement });
   }
   const roadCells = plan.cells.filter((cell) => roadSides(cell).length);
   for (const cell of roadCells) if (isNode(cell)) for (const d of roadSides(cell)) if (!seen(cell, d)) trace(cell, d);
@@ -314,23 +318,210 @@ function along(street, step, trim = 0.42) {
 const ground = makeFlat();
 const half = N / 2;
 ground.polygon([[-half, -half], [half, -half], [half, half], [-half, half]], Y.ground, SW.ground, GRASS);
-for (const cell of plan.cells) {
-  if (cell.id === 'park' || cell.id === 'square') ground.polygon(cellRing(cell), Y.land, SW.park, GRASS);
-  // Paths through parks and the square, to neighbouring park cells and out to the street
-  if (cell.id === 'park' || cell.id === 'square') {
-    const o = warp(centreOf(cell));
-    for (let d = 0; d < 4; d++) {
-      const n = cellAt(cell.x + DIRS[d][0], cell.z + DIRS[d][1]);
-      if (!n) continue;
-      const toStreet = n.kind === 'road' || n.kind === 'main';
-      if (!toStreet && !['park', 'square', 'fountain'].includes(n.id)) continue;
-      // To a street, the path carries on across the verge to the pavement
-      const [x, z] = centreOf(cell), reach = toStreet ? 0.72 : 0.5;
-      ground.ribbon([0.25, 0.5, reach].reduce((p, k) => [...p, warp([x + DIRS[d][0] * k, z + DIRS[d][1] * k])], [o]), 0.06, Y.path, SW.paving, SURF.slabs);
+for (const cell of plan.cells) if (cell.id === 'park' || cell.id === 'square') ground.polygon(cellRing(cell), Y.land, SW.park, GRASS);
+
+// ---------------------------------------------------------------- park paths
+// Paths go where people would walk. Each park (a group of park cells side by side) gets
+// entrances only where a street runs along its edge, then a path from each entrance to a hub
+// near its middle:
+// - 2 entrances: one path through the park, from street to street, with a bench beside it
+// - 1, or 3 and more: paths meet at a small round seating area with benches
+// - none: no paths
+// The courthouse square gets paths in from the middle of each side and from each corner, to
+// the fountain. Paths run straight where they can, and curve round corners where they can't.
+// Everything is worked out on the plan, then warped like the streets.
+const parkPaths = [];             // the paths as drawn (warped), so trees keep off them
+const plazas = [];                // seating areas: { o, r }, warped
+const parkBenches = new Map();    // cell index → benches to place: [{ p, rot }]
+{
+  const segDist = (p, a, b) => {
+    const dx = b[0] - a[0], dz = b[1] - a[1], l2 = dx * dx + dz * dz || 1;
+    const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / l2));
+    return Math.hypot(p[0] - a[0] - dx * t, p[1] - a[1] - dz * t);
+  };
+  for (const st of streets) {
+    st.box = st.plan.reduce((b, [x, z]) => [Math.min(b[0], x), Math.min(b[1], z), Math.max(b[2], x), Math.max(b[3], z)], [Infinity, Infinity, -Infinity, -Infinity]);
+  }
+  // Whether a plan point is on a street's pavement or road
+  const onStreet = (p) => streets.some((st) => {
+    if (p[0] < st.box[0] - 1 || p[1] < st.box[1] - 1 || p[0] > st.box[2] + 1 || p[1] > st.box[3] + 1) return false;
+    for (let i = 0; i < st.plan.length - 1; i++) if (segDist(p, st.plan[i], st.plan[i + 1]) < st.pavement / 2 - 0.02) return true;
+    return false;
+  });
+  // Walks out from p along dir until it's on a street's pavement; null if there's none within reach
+  function reachStreet(p, dir, max) {
+    for (let t = 0; t <= max; t += 0.02) {
+      const q = [p[0] + dir[0] * t, p[1] + dir[1] * t];
+      if (onStreet(q)) return [p[0] + dir[0] * (t + 0.05), p[1] + dir[1] * (t + 0.05)];
     }
-    ground.disc(o, 0.05, Y.path, SW.paving);
+    return null;
+  }
+  // Corner cutting, keeping both ends where they are
+  function smooth(pts, rounds = 3) {
+    for (let k = 0; k < rounds; k++) {
+      const out = [pts[0]];
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i], b = pts[i + 1];
+        if (i > 0) out.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25]);
+        if (i < pts.length - 2) out.push([a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]);
+      }
+      out.push(pts.at(-1));
+      pts = out;
+    }
+    return pts;
+  }
+  const lengthOf = (pts) => pts.slice(1).reduce((s, p, i) => s + Math.hypot(...sub(p, pts[i])), 0);
+  // A point part way along a line, and the line's direction there
+  function pointAlong(pts, s) {
+    for (let i = 0; i < pts.length - 1; i++) {
+      const l = Math.hypot(...sub(pts[i + 1], pts[i]));
+      if (s <= l || i === pts.length - 2) { const t = Math.min(1, s / (l || 1)); return [[pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t, pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t], norm(sub(pts[i + 1], pts[i]))]; }
+      s -= l;
+    }
+  }
+  const cellIndex = (p) => Math.round(p[1] + c) * N + Math.round(p[0] + c);
+  const addBench = (planP, planFacing) => {
+    // A bench at planP, facing towards planFacing
+    const p = warp(planP), D = norm(sub(p, warp(planFacing)));
+    const list = parkBenches.get(cellIndex(planP)) ?? [];
+    list.push({ p, rot: Math.atan2(D[0], D[1]) + Math.PI });
+    parkBenches.set(cellIndex(planP), list);
+  };
+  let layer = 0;
+  // Draws a path given on the plan, a little above the last so overlapping paths don't flicker
+  function drawPath(planPts) {
+    const dense = [];
+    for (let i = 0; i < planPts.length - 1; i++) {
+      const steps = Math.max(1, Math.ceil(Math.hypot(...sub(planPts[i + 1], planPts[i])) / 0.08));
+      for (let k = 0; k < steps; k++) dense.push([planPts[i][0] + (planPts[i + 1][0] - planPts[i][0]) * k / steps, planPts[i][1] + (planPts[i + 1][1] - planPts[i][1]) * k / steps]);
+    }
+    dense.push(planPts.at(-1));
+    const pts = dense.map(warp);
+    ground.ribbon(pts, 0.055, Y.path + (layer++ % 12) * 0.00005, SW.paving, SURF.slabs);
+    parkPaths.push(pts);
+  }
+
+  // Parks, and the square with its fountain, as groups of cells side by side
+  const kindOf = (cell) => (cell.id === 'park' ? 'park' : cell.id === 'square' || cell.id === 'fountain' ? 'square' : null);
+  const seen = new Set(), regions = [];
+  for (const cell of plan.cells) {
+    const kind = kindOf(cell);
+    if (!kind || seen.has(cell)) continue;
+    const cells = [], stack = [cell];
+    seen.add(cell);
+    while (stack.length) {
+      const a = stack.pop();
+      cells.push(a);
+      for (const [dx, dz] of DIRS) { const b = cellAt(a.x + dx, a.z + dz); if (b && !seen.has(b) && kindOf(b) === kind) { seen.add(b); stack.push(b); } }
+    }
+    regions.push({ kind, cells });
+  }
+
+  for (const { kind, cells } of regions) {
+    const set = new Set(cells);
+    const inside = ([x, z]) => set.has(cellAt(Math.round(x + c), Math.round(z + c)));
+    // The hub: the fountain, or the park cell nearest the park's middle
+    const mid = cells.reduce((m, k) => [m[0] + centreOf(k)[0] / cells.length, m[1] + centreOf(k)[1] / cells.length], [0, 0]);
+    const hub = kind === 'square' ? cells.find((k) => k.id === 'fountain') : cells.reduce((a, b) => (Math.hypot(...sub(centreOf(a), mid)) <= Math.hypot(...sub(centreOf(b), mid)) ? a : b));
+    const H = centreOf(hub);
+
+    // Routes to the hub: straight if that stays in the park, otherwise round its corners
+    const prev = new Map([[hub, null]]), queue = [hub];
+    while (queue.length) {
+      const a = queue.shift();
+      for (const [dx, dz] of DIRS) { const b = cellAt(a.x + dx, a.z + dz); if (b && set.has(b) && !prev.has(b)) { prev.set(b, a); queue.push(b); } }
+    }
+    // Whether the straight line from a to b stays in the park
+    const clear = (a, b) => Array.from({ length: 19 }, (_, i) => (i + 1) / 20).every((t) => inside([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]));
+    const route = (e) => {
+      const cells = [e.m];
+      for (let k = e.cell; k && k !== hub; k = prev.get(k)) cells.push(centreOf(k));
+      cells.push(H);
+      // Pull the route tight: from each point, go straight to the furthest point it can see
+      const tight = [cells[0]];
+      for (let i = 0; i < cells.length - 1;) {
+        let j = cells.length - 1;
+        while (j > i + 1 && !clear(cells[i], cells[j])) j--;
+        tight.push(cells[j]);
+        i = j;
+      }
+      return [e.q, ...tight];
+    };
+
+    // Possible entrances: the middle of each edge with a street running along it
+    let cands = [];
+    for (const cell of cells) for (let d = 0; d < 4; d++) {
+      const n = cellAt(cell.x + DIRS[d][0], cell.z + DIRS[d][1]);
+      if (!n || set.has(n) || (n.kind !== 'road' && n.kind !== 'main')) continue;
+      if (kind === 'square' && cell.x !== hub.x && cell.z !== hub.z) continue;
+      const C = centreOf(cell), m = [C[0] + DIRS[d][0] * 0.5, C[1] + DIRS[d][1] * 0.5];
+      const q = reachStreet(m, DIRS[d], 0.7);
+      if (q) cands.push({ cell, m, q });
+    }
+    let entrances = cands;
+    if (kind === 'square') {
+      // and the square's corners, out along the diagonals
+      const xs = cells.map((k) => centreOf(k)[0]), zs = cells.map((k) => centreOf(k)[1]);
+      for (const [sx, sz] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+        const m = [sx < 0 ? Math.min(...xs) - 0.5 : Math.max(...xs) + 0.5, sz < 0 ? Math.min(...zs) - 0.5 : Math.max(...zs) + 0.5];
+        const q = reachStreet(m, norm([sx, sz]), 1);
+        if (q) entrances.push({ cell: cellAt(Math.round(m[0] - sx * 0.25 + c), Math.round(m[1] - sz * 0.25 + c)), m, q });
+      }
+    } else if (cands.length) {
+      // Leave out entrances whose path would wander round a corner of the park, unless that's all there is
+      const direct = cands.filter((e) => lengthOf(route(e).slice(1)) <= 1.35 * Math.max(Math.hypot(...sub(e.m, H)), 0.3));
+      if (direct.length) cands = direct;
+      // As far apart as possible: 2 for a one-cell park, up to 3 or 4 for bigger ones
+      const want = cells.length === 1 ? 2 : cells.length <= 4 ? 3 : 4;
+      entrances = [cands[Math.floor(rand() * cands.length)]];
+      while (entrances.length < want) {
+        let best = null, far = 0;
+        for (const e of cands) {
+          if (entrances.includes(e)) continue;
+          const d = Math.min(...entrances.map((s) => Math.hypot(...sub(e.m, s.m))));
+          if (d > far) { far = d; best = e; }
+        }
+        if (!best || far < 0.9) break;
+        entrances.push(best);
+      }
+    }
+    if (!entrances.length) continue;
+
+
+    if (kind !== 'square' && entrances.length === 2) {
+      // One path through the park, with a bench halfway along
+      const pts = smooth([...route(entrances[0]), ...route(entrances[1]).reverse().slice(1)]);
+      drawPath(pts);
+      const L = lengthOf(pts), [p, t] = pointAlong(pts, L / 2), side = rand() < 0.5 ? 1 : -1;
+      addBench([p[0] - t[1] * side * 0.065, p[1] + t[0] * side * 0.065], p);
+      continue;
+    }
+    const routes = entrances.map((e) => smooth(route(e)));
+    routes.forEach(drawPath);
+    if (kind === 'square') continue;   // the fountain's paving is the hub
+    // A round seating area where the paths meet, with benches between the paths
+    const R = 0.1;
+    ground.disc(warp(H), R, Y.path + 0.0007, SW.paving, [SURF.slabs, 1, 0], 24);
+    plazas.push({ o: warp(H), r: R });
+    const arms = routes.map((r) => Math.atan2(...sub(r.at(-2), H).reverse()));
+    const gap = (a) => Math.min(...arms.map((b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)))));
+    const spots = Array.from({ length: 12 }, (_, i) => i * Math.PI / 6).filter((a) => gap(a) > 0.8).sort((a, b) => gap(b) - gap(a));
+    const benches = [];
+    for (const a of spots) if (benches.length < 2 && benches.every((b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b))) > 1.2)) benches.push(a);
+    for (const a of benches) addBench([H[0] + Math.cos(a) * (R + 0.04), H[1] + Math.sin(a) * (R + 0.04)], H);
   }
 }
+// Whether a point is clear of park paths and seating areas
+const clearOfPaths = (p, gap = 0.08) =>
+  plazas.every(({ o, r }) => Math.hypot(...sub(p, o)) > r + gap + 0.02) &&
+  parkPaths.every((pts) => {
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i], b = pts[i + 1], dx = b[0] - a[0], dz = b[1] - a[1], l2 = dx * dx + dz * dz || 1;
+      const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / l2));
+      if (Math.hypot(p[0] - a[0] - dx * t, p[1] - a[1] - dz * t) < gap) return false;
+    }
+    return true;
+  });
 for (const st of streets) {
   ground.ribbon(st.pts, st.pavement, Y.pavement, SW.pavement, SURF.pavement);
   ground.ribbon(st.pts, st.road, Y.road, SW.asphalt, SURF.asphalt);
@@ -347,6 +538,26 @@ for (const cell of plan.cells) {
   ground.disc(o, road / 2, Y.road, SW.asphalt, [SURF.asphalt, 1, 0], 20);
 }
 city.add(ground.mesh());
+if (params.has('debug')) {
+  // Sharp corners inside a street line, and where each street starts and ends
+  for (const st of streets) {
+    const line = st.plan.filter((p, i) => i === 0 || Math.hypot(...sub(p, st.plan[i - 1])) > 1e-6);
+    for (let i = 1; i < line.length - 1; i++) {
+      const a = norm(sub(line[i], line[i - 1])), b = norm(sub(line[i + 1], line[i]));
+      const turn = Math.acos(Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1]))) / DEG;
+      if (turn > 40) console.log(`DEBUG sharp ${turn.toFixed(0)}° at plan ${line[i].map((v) => (v + c).toFixed(2))} street ${st.cls} from ${st.plan[0].map((v) => (v + c).toFixed(1))} to ${st.plan.at(-1).map((v) => (v + c).toFixed(1))}`);
+    }
+  }
+  const ends = new Map();
+  for (const st of streets) for (const p of [st.plan[0], st.plan.at(-1)]) { const k = p.map((v) => (v + c).toFixed(2)).join(','); ends.set(k, (ends.get(k) ?? 0) + 1); }
+  for (const [k, n] of ends) {
+    const [x, z] = k.split(',').map(Number), cell = cellAt(Math.round(x), Math.round(z));
+    const atCentre = Math.abs(x - Math.round(x)) < 1e-6 && Math.abs(z - Math.round(z)) < 1e-6;
+    const offMap = [x, z].some((v) => Math.abs(v + 0.5) < 1e-6 || Math.abs(v - N + 0.5) < 1e-6);
+    if (!offMap && (!atCentre || !isNode(cell))) console.log(`DEBUG end at ${k}: ${n} street ends, cell ${cell?.id} sides ${cell?.sides.join('')}`);
+  }
+  console.log(`DEBUG parks: ${parkPaths.length} paths, ${plazas.length} seating areas`);
+}
 {
   const slab = new THREE.Mesh(new THREE.BoxGeometry(N, 0.3, N), new THREE.MeshLambertMaterial({ color: 0x5b4636 }));
   slab.position.y = -0.152;
@@ -412,10 +623,16 @@ async function backGarden(g, fr, F, n) {
 }
 async function scatter(g, fr, n, list, { y = KERB, spread = 0.76, avoidPaths = false } = {}) {
   for (let i = 0; i < n; i++) {
-    let u, v;
-    do { u = (rand() - 0.5) * spread; v = (rand() - 0.5) * spread; } while (avoidPaths && (Math.abs(u) < 0.09 || Math.abs(v) < 0.09));
-    await place(pick(list), lotPoint(fr, [0, 1], u, v), { y, s: 0.85 + rand() * 0.45, rot: rand() * 6.28, parent: g });
+    let p, tries = 0;
+    do p = lotPoint(fr, [0, 1], (rand() - 0.5) * spread, (rand() - 0.5) * spread);
+    while (avoidPaths && !clearOfPaths(p) && ++tries < 30);
+    if (avoidPaths && !clearOfPaths(p)) continue;
+    await place(pick(list), p, { y, s: 0.85 + rand() * 0.45, rot: rand() * 6.28, parent: g });
   }
+}
+// The benches the park paths asked for in this cell
+async function benches(g, cell) {
+  for (const { p, rot } of parkBenches.get(cell.z * N + cell.x) ?? []) await place('bench-old', p, { rot, y: Y.path, parent: g });
 }
 
 // Every non-road cell gets its own group, so the town can grow cell by cell in the order the solver decided
@@ -482,13 +699,14 @@ async function buildLot(cell) {
       break;
     }
     case 'park':
+      await benches(g, cell);
       await scatter(g, fr, 3 + Math.floor(rand() * 2), TREES, { y: Y.land, avoidPaths: true });
-      if (rand() < 0.5) await place('bench-old', lotPoint(fr, [0, 1], 0.14, 0.14), { rot: pick([0, 1, 2, 3]) * Math.PI / 2, y: Y.land, parent: g });
       break;
     case 'woods':
       await scatter(g, fr, 5 + Math.floor(rand() * 3), TREES.concat(CONIFERS), { y: 0, spread: 0.9 });
       break;
     case 'square':
+      await benches(g, cell);
       await scatter(g, fr, 2, ['tree-lime', 'tree-round'], { y: Y.land, avoidPaths: true });
       break;
     case 'fountain':
@@ -572,13 +790,10 @@ if (LIVE) {
   controls.addEventListener('change', () => { dirty = true; });
   addEventListener('resize', () => { const a = innerWidth / innerHeight; Object.assign(cam, { left: -halfView * a, right: halfView * a }); cam.updateProjectionMatrix(); view.setSize(innerWidth, innerHeight); dirty = true; });
 
-  // Panel: seed, new town, straight or bent streets, replay, and the time of day
+  // Panel: seed, new town, replay, and the time of day
   const go = (changes) => { const p = new URLSearchParams(location.search); for (const [k, v] of Object.entries(changes)) p.set(k, v); location.search = p; };
   document.getElementById('seedLabel').textContent = `seed ${SEED} · ${N}×${N} cells · solved in ${plan.tries} ${plan.tries === 1 ? 'try' : 'tries'}`;
   document.getElementById('new').onclick = () => go({ seed: 1 + Math.floor(Math.random() * 9999) });
-  const warpButton = document.getElementById('warp');
-  warpButton.textContent = WARP ? 'Straight streets' : 'Bent streets';
-  warpButton.onclick = () => go({ warp: WARP ? 0 : 1 });
   let playing = false;
   const playButton = document.getElementById('play'), slider = document.getElementById('time'), phase = document.getElementById('phase');
   playButton.onclick = () => { playing = !playing; playButton.textContent = playing ? 'Pause' : 'Play'; };
@@ -640,14 +855,21 @@ if (LIVE) {
     ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H); ctx.drawImage(renderer.domElement, 0, 0);
     await post(await png(cv), name);
   };
-  const mapCanvas = document.createElement('canvas'); mapCanvas.width = mapCanvas.height = N * 16;
-  drawMap(mapCanvas);
-  await post(await png(mapCanvas), 'town-map');
-  await post(`${plan.map}\n\nseed ${SEED}, solved in ${plan.tries} tries\n${LEGEND}\n`, 'town-map.txt');
-  await shot(new THREE.Vector3(0, 0, 0), N * 0.6, 'town-whole');
-  await shot(new THREE.Vector3(0, 0, 0), 4.6, 'town-square');
-  await shot(new THREE.Vector3(N * 0.22, 0, N * 0.22), 5, 'town-neighbourhood');
-  await shot(new THREE.Vector3(-2.5, 0, 1.5), 2, 'town-closeup');
+  if (params.has('shot')) {
+    // ?shot=x,z,half renders just one view, centred on plan cell (x, z), half the view's height across
+    const [x, z, h] = params.get('shot').split(',').map(Number);
+    const [wx, wz] = warp([x - c, z - c]);
+    await shot(new THREE.Vector3(wx, 0, wz), h || 1.5, 'town-shot');
+  } else {
+    const mapCanvas = document.createElement('canvas'); mapCanvas.width = mapCanvas.height = N * 16;
+    drawMap(mapCanvas);
+    await post(await png(mapCanvas), 'town-map');
+    await post(`${plan.map}\n\nseed ${SEED}, solved in ${plan.tries} tries\n${LEGEND}\n`, 'town-map.txt');
+    await shot(new THREE.Vector3(0, 0, 0), N * 0.6, 'town-whole');
+    await shot(new THREE.Vector3(0, 0, 0), 4.6, 'town-square');
+    await shot(new THREE.Vector3(N * 0.22, 0, N * 0.22), 5, 'town-neighbourhood');
+    await shot(new THREE.Vector3(-2.5, 0, 1.5), 2, 'town-closeup');
+  }
 }
 document.title = 'done';
 </script>
