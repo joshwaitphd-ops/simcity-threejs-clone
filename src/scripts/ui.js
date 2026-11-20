@@ -1,4 +1,5 @@
 import { Game } from './game';
+import { DayNightCycle } from './dayNight';
 import { SimObject } from './sim/simObject';
 import playIconUrl from '/icons/play-color.png';
 import pauseIconUrl from '/icons/pause-color.png';
@@ -71,6 +72,20 @@ export class GameUI {
     const date = new Date('1/1/2023');
     date.setDate(date.getDate() + game.city.simTime);
     document.getElementById('sim-time').innerHTML = date.toLocaleDateString();
+  }
+
+  /**
+   * Shows the time of day in the title bar and colours the sky behind the city
+   * @param {DayNightCycle} dayNight
+   */
+  updateTimeOfDay(dayNight) {
+    const label = document.getElementById('time-of-day');
+    if (label.textContent !== dayNight.phase) {
+      label.textContent = dayNight.phase;
+    }
+    document.getElementById('day-marker').style.left = `${dayNight.time * 100}%`;
+    document.body.style.background =
+      `linear-gradient(0deg, #${dayNight.skyBottom.getHexString()}, #${dayNight.skyTop.getHexString()})`;
   }
 
   /**

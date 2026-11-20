@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { addWindowLights, createWindowLights } from '../../dayNight.js';
 import { SimObject } from '../simObject';
 import { BuildingStatus } from './buildingStatus';
 import { PowerModule } from './modules/power';
@@ -33,6 +34,10 @@ export class Building extends SimObject {
    * @type {Sprite}
    */
   #statusIcon = new THREE.Sprite();
+  /**
+   * Settings for this building's window lights, which come on at night
+   */
+  #windowLights = createWindowLights();
 
   constructor() {
     super();
@@ -42,7 +47,33 @@ export class Building extends SimObject {
     this.#statusIcon.scale.set(0.5, 0.5, 0.5);
     this.add(this.#statusIcon);
   }
-  
+
+  /**
+   * True if this building's windows light up at night. Set it to false
+   * to keep the building dark.
+   * @type {boolean}
+   */
+  get lightsOn() {
+    return this.#windowLights.on.value === 1;
+  }
+
+  set lightsOn(value) {
+    this.#windowLights.on.value = value ? 1 : 0;
+  }
+
+  /**
+   * Sets the building's mesh and connects its windows to the day/night cycle
+   * @param {THREE.Mesh} value
+   */
+  setMesh(value) {
+    super.setMesh(value);
+    value?.traverse((obj) => {
+      if (obj.material) {
+        addWindowLights(obj.material, this.#windowLights);
+      }
+    });
+  }
+
   /**
    * 
    * @param {*} status 

@@ -11,13 +11,39 @@
   html, body { margin: 0; height: 100%; overflow: hidden; background: linear-gradient(0deg, #3a5177, #81b1e0); font: 14px -apple-system, Helvetica, sans-serif; color: #fff; }
   #loading { position: fixed; inset: 0; display: grid; place-items: center; font-size: 22px; }
   #help { position: fixed; left: 16px; bottom: 16px; opacity: 0.85; }
+
+  /* DEMO: time-of-day slider. Remove with the #demo-time panel and the DEMO script block. */
+  #demo-time { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 10; width: min(560px, calc(100% - 32px)); box-sizing: border-box;
+    display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-radius: 14px; background: #0e1424cc; backdrop-filter: blur(6px); }
+  #demo-time[hidden] { display: none; }
+  #demo-play { flex: none; width: 64px; padding: 6px 0; border: 1px solid #ffffff40; border-radius: 8px; background: none; color: #fff; font: inherit; cursor: pointer; }
+  #demo-play:hover { background: #ffffff1a; }
+  .demo-track { flex: 1; min-width: 0; }
+  #demo-slider { -webkit-appearance: none; appearance: none; width: 100%; height: 8px; margin: 6px 0; border-radius: 4px; cursor: pointer;
+    background: linear-gradient(90deg, #f0a986 0 25%, #f5c451 25% 50%, #e8744f 50% 75%, #4a5aa8 75% 100%); }
+  #demo-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 0 6px #000a; }
+  #demo-slider::-moz-range-thumb { width: 18px; height: 18px; border: none; border-radius: 50%; background: #fff; box-shadow: 0 0 6px #000a; }
+  .demo-labels { display: flex; font-size: 11px; opacity: 0.75; }
+  .demo-labels span { flex: 1; text-align: center; }
+  #demo-phase { flex: none; width: 76px; text-align: right; font-weight: 600; }
 </style>
 <div id="loading">Building the city…</div>
 <div id="help">Drag to pan · Right-drag to rotate · Scroll to zoom</div>
+<!-- DEMO: time-of-day slider. Remove this panel and the DEMO script block when the demo is done. -->
+<div id="demo-time" hidden>
+  <button id="demo-play" type="button">Pause</button>
+  <div class="demo-track">
+    <input id="demo-slider" type="range" min="0" max="1000" value="100" aria-label="Time of day">
+    <div class="demo-labels"><span>Morning</span><span>Day</span><span>Afternoon</span><span>Night</span></div>
+  </div>
+  <span id="demo-phase">Morning</span>
+</div>
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+// The game's own day/night cycle, linked in from src/scripts
+import { DayNightCycle, addWindowLights, createWindowLights } from './scripts/dayNight.js';
 
 const W = 1800, H = 1150, DEG = Math.PI / 180;
 const params = new URLSearchParams(location.search);
@@ -260,6 +286,17 @@ function chooseModels(t, m2, core) {
 
 const plinths = [];
 const houses = [];
+// Every building, with its window light settings, so its lights can be switched later
+const litBuildings = [];
+// Gives a building its own copy of the palette material, so its windows light up at night
+// on their own. Cars and trees keep the shared material and stay dark.
+function addLights(building) {
+  const lights = createWindowLights();
+  const own = material.clone();
+  addWindowLights(own, lights);
+  building.traverse((o) => { if (o.isMesh) o.material = own; });
+  litBuildings.push({ building, lights });
+}
 async function buildings() {
   for (const bw of buildingsRaw) {
     if (SKIP.has(bw.tags.building)) continue;
@@ -294,7 +331,7 @@ async function buildings() {
     for (let i = 0; i < count; i++) {
       const off = (i - (count - 1) / 2) * (frontage / count);
       const n = i === 0 ? name : pick(chooseModels(bw.tags, m2 / count, core));
-      await place(n, centre[0] + side[0] * off, centre[1] + side[1] * off, { rot, s: count > 1 ? Math.min(s, frontage / count * 0.92 / (await sizeOf(n))[0]) : s, y: 0.03 });
+      addLights(await place(n, centre[0] + side[0] * off, centre[1] + side[1] * off, { rot, s: count > 1 ? Math.min(s, frontage / count * 0.92 / (await sizeOf(n))[0]) : s, y: 0.03 }));
     }
     if (!core && m2 < 800) houses.push({ centre, f, depth });
   }
@@ -405,7 +442,9 @@ if (LIVE) {
   document.body.appendChild(view.domElement);
   const scene = new THREE.Scene(); scene.add(city);
   const centre = new THREE.Vector3(0, 0, 0), half = 20;
-  lights(scene, centre, half);
+  // The game's day/night cycle lights the city: sun, moon, sky colour and window lights
+  const cycle = new DayNightCycle(scene, centre, half * 1.8);
+  cycle.keyLight.shadow.mapSize.set(4096, 4096);
   const cam = camera(centre, half, innerWidth / innerHeight);
   const controls = new OrbitControls(cam, view.domElement);
   controls.target.copy(centre);
@@ -414,11 +453,52 @@ if (LIVE) {
   controls.screenSpacePanning = false;
   controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
   controls.update();
-  const draw = () => view.render(scene, cam);
-  controls.addEventListener('change', draw);
-  addEventListener('resize', () => { const a = innerWidth / innerHeight; Object.assign(cam, { left: -half * a, right: half * a }); cam.updateProjectionMatrix(); view.setSize(innerWidth, innerHeight); draw(); });
-  view.shadowMap.needsUpdate = true;
-  draw();
+  // The city is drawn when the camera moves, and a few times a second as the light changes
+  let cameraMoved = true;
+  controls.addEventListener('change', () => { cameraMoved = true; });
+  addEventListener('resize', () => { const a = innerWidth / innerHeight; Object.assign(cam, { left: -half * a, right: half * a }); cam.updateProjectionMatrix(); view.setSize(innerWidth, innerHeight); cameraMoved = true; });
+
+  // Whether time runs on its own. The demo slider's button switches it.
+  let playing = true;
+  // Called each frame so the demo slider can follow the clock
+  let onTimeChanged = () => {};
+
+  // ---- DEMO: time-of-day slider. Remove this block with the #demo-time panel. ----
+  {
+    const panel = document.getElementById('demo-time');
+    const slider = document.getElementById('demo-slider');
+    const play = document.getElementById('demo-play');
+    const phase = document.getElementById('demo-phase');
+    let dragging = false;
+    panel.hidden = false;
+    slider.addEventListener('input', () => { dragging = true; cycle.time = slider.value / 1000; cycle.update(0); });
+    slider.addEventListener('change', () => { dragging = false; });
+    play.addEventListener('click', () => { playing = !playing; play.textContent = playing ? 'Pause' : 'Play'; });
+    onTimeChanged = () => {
+      if (!dragging) slider.value = Math.round(cycle.time * 1000);
+      if (phase.textContent !== cycle.phase) phase.textContent = cycle.phase;
+    };
+  }
+  // ---- end DEMO ----
+
+  // The city has over 14,000 meshes, so drawing it is slow. Light changes slowly, so
+  // drawing about 20 times a second as time passes looks the same as every frame.
+  // Shadows are redrawn only once the sun has moved a little.
+  const clock = new THREE.Clock();
+  let drawnTime = -1, drawnAt = 0, shadowTime = -1;
+  view.setAnimationLoop((now) => {
+    const deltaSeconds = Math.min(clock.getDelta(), 0.1);
+    cycle.update(playing ? deltaSeconds : 0);
+    onTimeChanged();
+    const timeChanged = cycle.time !== drawnTime && now - drawnAt > 50;
+    if (!cameraMoved && !timeChanged) return;
+    if (Math.abs(cycle.time - shadowTime) > 0.001) { view.shadowMap.needsUpdate = true; shadowTime = cycle.time; }
+    document.body.style.background = `linear-gradient(0deg, #${cycle.skyBottom.getHexString()}, #${cycle.skyTop.getHexString()})`;
+    view.render(scene, cam);
+    cameraMoved = false; drawnTime = cycle.time; drawnAt = now;
+  });
+  // For trying things from the console, such as switching a building's lights off
+  window.organic = { cycle, buildings: litBuildings };
   document.getElementById('loading').remove();
   if (params.has('snapshot')) await post(await png(view.domElement), 'organic-live');
 } else {

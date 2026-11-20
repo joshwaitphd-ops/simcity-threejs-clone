@@ -21,7 +21,7 @@ These are throwaway pages that render city ideas with the game's own models, pal
 | `tools/glb_bounds.py` | Prints every model's footprint in tiles |
 | `tools/sheet_server.py` | Serves this folder and saves the images each page posts back |
 
-`three`, `models` and `textures` are links into `node_modules` and `src/public`, so run `npm install` first.
+`three`, `models` and `textures` are links into `node_modules` and `src/public`, so run `npm install` first. `scripts` links to `src/scripts`, so `organic.html` uses the game's own day/night cycle.
 
 ## Explore a city in the browser
 
@@ -30,6 +30,8 @@ npm run prototype
 ```
 
 Then open http://127.0.0.1:3001/organic.html?live for the Santa Fe city, or http://127.0.0.1:3001/city2.html?live for the grid city. Drag to pan, right-drag to rotate, scroll to zoom.
+
+The Santa Fe city runs the 3-minute day/night cycle. The slider at the bottom sets the time of day, and its button pauses the clock. The slider is a demo feature only: remove the parts marked `DEMO` in `organic.html` when it's no longer needed.
 
 ## How to render images
 
