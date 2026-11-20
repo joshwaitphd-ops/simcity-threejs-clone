@@ -143,6 +143,43 @@ h1 {
   font-size: 2em;
 }
 
+/* Time of day */
+
+#time-of-day {
+  margin-left: 24px;
+}
+
+/* Day progress strip along the bottom of the title bar */
+
+#day-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 4px;
+  display: flex;
+}
+
+.day-segment {
+  flex: 1;
+  opacity: 0.8;
+}
+
+.day-segment.morning { background-color: #f0a986; }
+.day-segment.day { background-color: #f5c451; }
+.day-segment.afternoon { background-color: #e8744f; }
+.day-segment.night { background-color: #4a5aa8; }
+
+#day-marker {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 3px;
+  margin-left: -1px;
+  background-color: white;
+  box-shadow: 0 0 4px white;
+}
+
 #population-icon {
   position: relative;
   width: 32px;

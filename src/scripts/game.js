@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { AssetManager } from './assets/assetManager.js';
 import { CameraManager } from './camera.js';
+import { DayNightCycle } from './dayNight.js';
 import { InputManager } from './input.js';
 import { City } from './sim/city.js';
 import { SimObject } from './sim/simObject.js';
@@ -28,6 +29,16 @@ export class Game {
    * @type {SimObject | null}
    */
   selectedObject = null;
+  /**
+   * Time of day and the lighting that goes with it
+   * @type {DayNightCycle | null}
+   */
+  dayNight = null;
+  /**
+   * Measures real time between frames
+   * @type {THREE.Clock}
+   */
+  clock = new THREE.Clock();
 
   constructor(city) {
     this.city = city;
@@ -66,6 +77,13 @@ export class Game {
     });
 
     window.addEventListener('resize', this.onResize.bind(this), false);
+
+    // Press N to jump to the next time of day
+    window.addEventListener('keydown', (event) => {
+      if (event.key === 'n' || event.key === 'N') {
+        this.dayNight?.skipToNextPhase();
+      }
+    }, false);
   }
 
   /**
@@ -74,7 +92,8 @@ export class Game {
   initialize(city) {
     this.scene.clear();
     this.scene.add(city);
-    this.#setupLights();
+    const cityCenter = new THREE.Vector3(city.size / 2 - 0.5, 0, city.size / 2 - 0.5);
+    this.dayNight = new DayNightCycle(this.scene, cityCenter, 20);
     this.#setupGrid(city);
   }
 
@@ -99,26 +118,6 @@ export class Game {
   }
 
   /**
-   * Setup the lights for the scene
-   */
-  #setupLights() {
-    const sun = new THREE.DirectionalLight(0xffffff, 2)
-    sun.position.set(-10, 20, 0);
-    sun.castShadow = true;
-    sun.shadow.camera.left = -20;
-    sun.shadow.camera.right = 20;
-    sun.shadow.camera.top = 20;
-    sun.shadow.camera.bottom = -20;
-    sun.shadow.mapSize.width = 2048;
-    sun.shadow.mapSize.height = 2048;
-    sun.shadow.camera.near = 10;
-    sun.shadow.camera.far = 50;
-    sun.shadow.normalBias = 0.01;
-    this.scene.add(sun);
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.5));
-  }
-  
-  /**
    * Starts the renderer
    */
   start() {
@@ -136,6 +135,12 @@ export class Game {
    * Render the contents of the scene
    */
   draw() {
+    // Time of day stands still while the game is paused. The cap stops a jump
+    // in time after the browser tab has been in the background.
+    const deltaSeconds = Math.min(this.clock.getDelta(), 0.1);
+    this.dayNight.update(window.ui.isPaused ? 0 : deltaSeconds);
+    window.ui.updateTimeOfDay(this.dayNight);
+
     this.city.draw();
     this.updateFocusedObject();
 
