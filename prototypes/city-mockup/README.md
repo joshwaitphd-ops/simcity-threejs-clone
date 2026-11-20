@@ -60,7 +60,15 @@ Then, on top of plain WFC:
 - **Soft size cap** on parks, and **one of each landmark** (town hall, bank, school, fire station, police, hospital, data centre).
 - **Restarts:** a plan that contradicts itself, or whose streets don't all connect, is dropped. Of 6 working plans, the one with the fewest defects is kept. A 25×25 town takes 0.1–2.5 s.
 
-**Drawing it.** A gentle, smooth warp bends the whole grid, so streets curve a little while lots keep their shape (`?warp=0` for straight streets). Streets are traced from junction to junction and drawn as textured ribbons, with rounded bends and round junctions. Downtown streets get pavements wall to wall. Repeated points where two curves meet are dropped, as they used to double the street's width there and leave spikes. Lots get a raised base sized to the cell, and buildings in a row along their front, using city2's lot rules. Every house lot holds 2 houses, so plots are about 16 m wide.
+**Drawing it.** A gentle, smooth warp bends the whole grid, so streets curve a little while lots keep their shape (`?warp=0` for straight streets). Streets are traced from junction to junction and drawn as textured ribbons, with rounded bends and round junctions. Downtown streets get pavements wall to wall. Repeated points where two curves meet are dropped, as they used to double the street's width there and leave spikes. Lots lie flat and reach out to the pavement on every side that faces a street, so neighbouring lots meet with no gaps and there's no strip of verge between a lot and its street. Lots are laid out along the street rather than one per cell: a run of cells of the same kind facing the same street is one frontage, cut into plots sized to the kit:
+
+- **Houses:** each plot is a house, a driveway beside it and a little space either side, so plot widths vary with the house. Each gets a driveway and a path from the pavement, usually a car on the drive, and picket fences, wooden fences or hedges round the back garden.
+- **Townhouses:** wall to wall, a path to each front door, cars parked at the kerb, and fenced back yards.
+- **Shops:** one continuous row of shopfronts on the pavement, bins at the back and a car park behind. Away from the centre, cars also park on the forecourt.
+- **Flats:** blocks along the front with paths to their doors, and a driveway down the side to a car park at the back.
+- **Civic buildings:** set back behind a paved forecourt with lamps.
+
+Street trees go in the front gardens of residential streets, clear of driveways and paths.
 
 **Park paths** go where people would walk. Each park (park cells side by side) gets entrances only where a street runs along its edge, as far apart as possible, then a path from each to a hub near its middle:
 
@@ -76,7 +84,7 @@ For checking: `?debug` logs sharp corners in streets, street ends that aren't at
 
 To try the planner without a browser: `node -e "import('./lib/townPlan.js').then(({ planTown }) => console.log(planTown({ seed: 5 }).map))"`
 
-Renders: `renders/town-seed<n>-*.jpg`, and `renders/town-seed1-map.png` for the plan. `town` posts 1 image with `?shot=`.
+Renders: `renders/town-seed<n>-*.jpg` (`town-seed1-houses.jpg` and `town-seed1-downtown.jpg` close up), and `renders/town-seed1-map.png` for the plan. `town` posts 1 image with `?shot=`.
 
 ## Ground and building detail
 

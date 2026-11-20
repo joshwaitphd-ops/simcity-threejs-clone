@@ -49,6 +49,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { DayNightCycle, addWindowLights, createWindowLights } from './scripts/dayNight.js';
 import { SURF, PLAIN, GRASS, createLook } from './lib/look.js';
 import { planTown, DIRS, LEGEND } from './lib/townPlan.js';
@@ -314,11 +315,79 @@ function along(street, step, trim = 0.42) {
   return out;
 }
 
+// ---------------------------------------------------------------- distances to streets
+const segDist = (p, a, b) => {
+  const dx = b[0] - a[0], dz = b[1] - a[1], l2 = dx * dx + dz * dz || 1;
+  const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / l2));
+  return Math.hypot(p[0] - a[0] - dx * t, p[1] - a[1] - dz * t);
+};
+for (const st of streets) {
+  st.box = st.plan.reduce((b, [x, z]) => [Math.min(b[0], x), Math.min(b[1], z), Math.max(b[2], x), Math.max(b[3], z)], [Infinity, Infinity, -Infinity, -Infinity]);
+}
+// Whether a plan point is on a street's pavement or road
+const onStreet = (p) => streets.some((st) => {
+  if (p[0] < st.box[0] - 1 || p[1] < st.box[1] - 1 || p[0] > st.box[2] + 1 || p[1] > st.box[3] + 1) return false;
+  for (let i = 0; i < st.plan.length - 1; i++) if (segDist(p, st.plan[i], st.plan[i + 1]) < st.pavement / 2 - 0.02) return true;
+  return false;
+});
+// Walks out from p along dir until it's on a street's pavement; null if there's none within reach
+function reachStreet(p, dir, max) {
+  for (let t = 0; t <= max; t += 0.02) {
+    const q = [p[0] + dir[0] * t, p[1] + dir[1] * t];
+    if (onStreet(q)) return [p[0] + dir[0] * (t + 0.05), p[1] + dir[1] * (t + 0.05)];
+  }
+  return null;
+}
+// How far from p, along dir, a street's pavement starts, and that street; null if none within max
+function pavementGap(p, dir, max = 0.5) {
+  for (let t = 0; t <= max; t += 0.01) {
+    const q = [p[0] + dir[0] * t, p[1] + dir[1] * t];
+    for (const st of streets) {
+      if (q[0] < st.box[0] - 1 || q[1] < st.box[1] - 1 || q[0] > st.box[2] + 1 || q[1] > st.box[3] + 1) continue;
+      for (let i = 0; i < st.plan.length - 1; i++) if (segDist(q, st.plan[i], st.plan[i + 1]) < st.pavement / 2) return { t, st };
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- parcels
+// Lots, parks and the square reach out to the pavement on every side that faces a street, so
+// there's no strip of verge between them and the street. ext[d] is how far side d reaches past
+// its cell's edge, and street[d] the street it meets.
+const parcels = new Map();
+for (const cell of plan.cells) {
+  if (cell.kind === 'road' || cell.kind === 'main') continue;
+  const C = centreOf(cell), ext = [0, 0, 0, 0], street = [null, null, null, null];
+  for (let d = 0; d < 4; d++) {
+    const n = cellAt(cell.x + DIRS[d][0], cell.z + DIRS[d][1]);
+    if (!n || (n.kind !== 'road' && n.kind !== 'main')) continue;
+    const gap = pavementGap([C[0] + DIRS[d][0] * 0.5, C[1] + DIRS[d][1] * 0.5], DIRS[d]);
+    ext[d] = gap ? gap.t + 0.03 : 0.25;
+    street[d] = gap?.st ?? null;
+  }
+  parcels.set(cell, { ext, street });
+}
+// A parcel's corners on the plan
+function parcelPlan(cell) {
+  const [cx, cz] = centreOf(cell), { ext } = parcels.get(cell);
+  const x0 = cx - 0.5 - ext[2], x1 = cx + 0.5 + ext[0], z0 = cz - 0.5 - ext[3], z1 = cz + 0.5 + ext[1];
+  return [[x0, z0], [x1, z0], [x1, z1], [x0, z1]];
+}
+// A ring of plan corners, its edges split so the warp can bend them, warped
+function warpRing(corners, steps = 4) {
+  const ring = [];
+  for (let k = 0; k < corners.length; k++) {
+    const a = corners[k], b = corners[(k + 1) % corners.length];
+    for (let t = 0; t < steps; t++) ring.push(warp([a[0] + (b[0] - a[0]) * t / steps, a[1] + (b[1] - a[1]) * t / steps]));
+  }
+  return ring;
+}
+
 // ---------------------------------------------------------------- the ground, parks and roads
 const ground = makeFlat();
 const half = N / 2;
 ground.polygon([[-half, -half], [half, -half], [half, half], [-half, half]], Y.ground, SW.ground, GRASS);
-for (const cell of plan.cells) if (cell.id === 'park' || cell.id === 'square') ground.polygon(cellRing(cell), Y.land, SW.park, GRASS);
+for (const cell of plan.cells) if (cell.id === 'park' || cell.id === 'square') ground.polygon(warpRing(parcelPlan(cell)), Y.land, SW.park, GRASS);
 
 // ---------------------------------------------------------------- park paths
 // Paths go where people would walk. Each park (a group of park cells side by side) gets
@@ -334,28 +403,6 @@ const parkPaths = [];             // the paths as drawn (warped), so trees keep 
 const plazas = [];                // seating areas: { o, r }, warped
 const parkBenches = new Map();    // cell index → benches to place: [{ p, rot }]
 {
-  const segDist = (p, a, b) => {
-    const dx = b[0] - a[0], dz = b[1] - a[1], l2 = dx * dx + dz * dz || 1;
-    const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / l2));
-    return Math.hypot(p[0] - a[0] - dx * t, p[1] - a[1] - dz * t);
-  };
-  for (const st of streets) {
-    st.box = st.plan.reduce((b, [x, z]) => [Math.min(b[0], x), Math.min(b[1], z), Math.max(b[2], x), Math.max(b[3], z)], [Infinity, Infinity, -Infinity, -Infinity]);
-  }
-  // Whether a plan point is on a street's pavement or road
-  const onStreet = (p) => streets.some((st) => {
-    if (p[0] < st.box[0] - 1 || p[1] < st.box[1] - 1 || p[0] > st.box[2] + 1 || p[1] > st.box[3] + 1) return false;
-    for (let i = 0; i < st.plan.length - 1; i++) if (segDist(p, st.plan[i], st.plan[i + 1]) < st.pavement / 2 - 0.02) return true;
-    return false;
-  });
-  // Walks out from p along dir until it's on a street's pavement; null if there's none within reach
-  function reachStreet(p, dir, max) {
-    for (let t = 0; t <= max; t += 0.02) {
-      const q = [p[0] + dir[0] * t, p[1] + dir[1] * t];
-      if (onStreet(q)) return [p[0] + dir[0] * (t + 0.05), p[1] + dir[1] * (t + 0.05)];
-    }
-    return null;
-  }
   // Corner cutting, keeping both ends where they are
   function smooth(pts, rounds = 3) {
     for (let k = 0; k < rounds; k++) {
@@ -564,14 +611,8 @@ if (params.has('debug')) {
   city.add(slab);
 }
 
-// ---------------------------------------------------------------- street dressing
+// ---------------------------------------------------------------- street dressing: lamps and traffic
 for (const st of streets) {
-  // Street trees in the verges of residential streets
-  if (st.cls === 'r' && !st.downtown) {
-    for (const [p, t] of along(st, 0.32, 0.48)) {
-      for (const side of [-1, 1]) if (rand() < 0.5) await place(pick(['tree-round', 'tree-lime', 'tree-elipse']), [p[0] - t[1] * side * 0.37, p[1] + t[0] * side * 0.37], { s: 0.8 + rand() * 0.3, rot: rand() * 6.28 });
-    }
-  }
   // Lamps along main roads downtown
   if (st.cls === 'm' && st.downtown) {
     let side = 1;
@@ -586,6 +627,20 @@ for (const st of streets) {
 }
 
 // ---------------------------------------------------------------- lots
+// Lots are laid out along the street, not one per cell. A run of cells of the same kind facing
+// the same street is one frontage, cut into plots sized to the kit's buildings:
+// - houses: a plot is a house, a driveway beside it and a little space either side, so a street
+//   has houses of different widths. Each gets a driveway and a path from the pavement, a car,
+//   and fences or hedges round its back garden.
+// - townhouses: wall to wall, a path to each door, cars parked at the kerb
+// - shops: one continuous row of shopfronts on the pavement, a car park behind
+// Lot surfaces lie flat and reach the pavement, so neighbouring lots meet with no gaps and a
+// block reads as one block. Flats, civic buildings, car parks and gardens are laid out per cell.
+const facing = (F) => Math.atan2(F[0], F[1]);
+// The warped direction of plan direction D at plan point p
+const wdir = (p, D) => norm(sub(warp([p[0] + D[0] * 0.05, p[1] + D[1] * 0.05]), warp(p)));
+const LOT_Y = 0.005;   // buildings stand just above the lot surfaces
+
 // A lot's frame: its warped centre, and the warped direction of each of its sides
 function frameOf(cell) {
   const C = centreOf(cell), o = warp(C);
@@ -596,31 +651,7 @@ function frameOf(cell) {
 const frontOf = (cell) => (3 + cell.rot) % 4;
 // A point in a lot, u across its front and v towards it
 function lotPoint({ o }, F, u, v) { return [o[0] - F[1] * u + F[0] * v, o[1] + F[0] * u + F[1] * v]; }
-const facing = (F) => Math.atan2(F[0], F[1]);
 
-// A row of buildings side by side along the front of a lot, fronts near the pavement
-async function row(g, fr, F, names, { setback = 0.03, gap = 0.02, max = 0.86, back = false } = {}) {
-  const items = [];
-  let total = 0;
-  for (const name of names) {
-    let [w, d] = await sizeOf(name), s = 1;
-    if (w > max) { s = max / w; w *= s; d *= s; }
-    const extra = items.length ? gap : 0;
-    if (items.length && total + extra + w > max) continue;
-    total += extra + w;
-    items.push({ name, w, d, s });
-  }
-  let u = -total / 2;
-  for (const it of items) {
-    const v = (EDGE - setback - it.d / 2) * (back ? -1 : 1);
-    await place(it.name, lotPoint(fr, F, u + it.w / 2, v), { rot: facing(F), s: it.s, y: KERB, parent: g, building: true });
-    u += it.w + gap;
-  }
-}
-// Trees in the half of a lot away from the street
-async function backGarden(g, fr, F, n) {
-  for (let i = 0; i < n; i++) await place(pick(TREES), lotPoint(fr, F, (rand() - 0.5) * 0.7, -(0.14 + rand() * 0.24)), { y: KERB, s: 0.8 + rand() * 0.4, rot: rand() * 6.28, parent: g });
-}
 async function scatter(g, fr, n, list, { y = KERB, spread = 0.76, avoidPaths = false } = {}) {
   for (let i = 0; i < n; i++) {
     let p, tries = 0;
@@ -637,65 +668,250 @@ async function benches(g, cell) {
 
 // Every non-road cell gets its own group, so the town can grow cell by cell in the order the solver decided
 const cellGroups = [];
-async function buildLot(cell) {
+const groups = new Map();
+for (const cell of plan.cells) {
+  if (cell.kind === 'road' || cell.kind === 'main') continue;
   const g = new THREE.Group();
   g.userData.order = cell.order;
-  const fr = frameOf(cell), d = zone(centreOf(cell)), downtown = d < DOWNTOWN;
-  const front = frontOf(cell), F = fr.dir(front);
-  const paved = (warm) => g.add(plinth(cell, warm ? SW.plinthWarm : SW.plinth, [SURF.slabs, F[0], F[1]]));
+  groups.set(cell, g); city.add(g); cellGroups.push(g);
+}
+const groupAt = (p) => groups.get(cellAt(Math.round(p[0] + c), Math.round(p[1] + c))) ?? city;
+// Flat things (lot surfaces, driveways, paths, bay lines) and fences, collected per group
+const flats = new Map(), fenceSegs = new Map();
+const flatFor = (g) => { if (!flats.has(g)) flats.set(g, makeFlat()); return flats.get(g); };
+// Driveways and paths, so street trees keep off them: { pts (warped), r }
+const keepClear = [];
+
+// A strip from plan point a to b, drawn flat; returns it warped
+function strip(flat, a, b, width, y, s, kind = SURF.none) {
+  const n = Math.max(1, Math.ceil(Math.hypot(...sub(b, a)) / 0.1));
+  const pts = Array.from({ length: n + 1 }, (_, i) => warp([a[0] + (b[0] - a[0]) * i / n, a[1] + (b[1] - a[1]) * i / n]));
+  flat.ribbon(pts, width, y, s, kind);
+  return pts;
+}
+const clearPath = (flat, a, b, width, y, s, kind) => keepClear.push({ pts: strip(flat, a, b, width, y, s, kind), r: width / 2 + 0.05 });
+
+// Fences and hedges: thin boxes along a line, merged per group
+const FENCE_STYLES = {
+  picket: { colour: 0xf1ede2, h: 0.03, t: 0.006 },
+  wood: { colour: 0x8c6a48, h: 0.04, t: 0.007 },
+  hedge: { colour: 0x3d6b33, h: 0.032, t: 0.024 },
+};
+const fenceMaterials = Object.fromEntries(Object.entries(FENCE_STYLES).map(([k, v]) => [k, new THREE.MeshLambertMaterial({ color: v.colour })]));
+function fence(g, style, a, b) {
+  if (!fenceSegs.has(g)) fenceSegs.set(g, []);
+  const n = Math.max(1, Math.ceil(Math.hypot(...sub(b, a)) / 0.1));
+  const at = (i) => warp([a[0] + (b[0] - a[0]) * i / n, a[1] + (b[1] - a[1]) * i / n]);
+  for (let i = 0; i < n; i++) fenceSegs.get(g).push([style, at(i), at(i + 1)]);
+}
+function buildFences(g, segs) {
+  for (const style of Object.keys(FENCE_STYLES)) {
+    const { h, t } = FENCE_STYLES[style];
+    const boxes = segs.filter(([s]) => s === style).map(([, a, b]) => {
+      const box = new THREE.BoxGeometry(Math.hypot(...sub(b, a)) + t, h, t);   // a little longer, so joins close up
+      return box.applyMatrix4(new THREE.Matrix4().makeRotationY(Math.atan2(-(b[1] - a[1]), b[0] - a[0])).setPosition((a[0] + b[0]) / 2, h / 2, (a[1] + b[1]) / 2));
+    });
+    if (!boxes.length) continue;
+    const m = new THREE.Mesh(mergeGeometries(boxes), fenceMaterials[style]);
+    m.castShadow = true; m.receiveShadow = true;
+    g.add(m);
+  }
+}
+// Places a model at plan point p, its front facing plan direction D
+function put(name, p, D, { turn = 0, s = 1, y = LOT_Y, building = false, g } = {}) {
+  return place(name, warp(p), { rot: facing(wdir(p, D)) + turn, s, y, parent: g ?? groupAt(p), building });
+}
+
+// A frontage along cells (in order along direction d + 1), facing side d. P(s, depth) is the plan
+// point s cells along the front, depth cells back from it (negative: out towards the street).
+const frontSide = (cell) => cell.sides.indexOf('f');
+function frameFor(cells, d) {
+  const A = DIRS[(d + 1) % 4], F = DIRS[d], C0 = centreOf(cells[0]);
+  const O = [C0[0] - A[0] * 0.5 + F[0] * 0.5, C0[1] - A[1] * 0.5 + F[1] * 0.5];
+  const P = (s, depth) => [O[0] + A[0] * s - F[0] * depth, O[1] + A[1] * s - F[1] * depth];
+  const cellAtS = (s) => cells[Math.max(0, Math.min(cells.length - 1, Math.floor(s)))];
+  // How far the pavement is in front of point s, measured there (streets curve), and that street
+  const gap = (s) => { const g = pavementGap(P(s, 0), F, 0.6); return g ? { t: g.t + 0.03, st: g.st } : { t: parcels.get(cellAtS(s)).ext[d], st: parcels.get(cellAtS(s)).street[d] }; };
+  return { A, F, P, n: cells.length, ext: (s) => gap(s).t, street: (s) => gap(s).st };
+}
+// Bays at the back of a frontage, s0..s1 along it, against depth `back`; cars face `D`
+async function bays(f, s0, s1, back, D, chance = 0.6) {
+  const W = 0.095, L = 0.17;
+  for (let s = s0; s + W <= s1 + 1e-6; s += W) {
+    const flat = flatFor(groupAt(f.P(s + W / 2, back - L / 2)));
+    strip(flat, f.P(s, back - L), f.P(s, back), 0.007, Y.path + 0.0004, SW.white);
+    if (s + 2 * W > s1 + 1e-6) strip(flat, f.P(s + W, back - L), f.P(s + W, back), 0.007, Y.path + 0.0004, SW.white);
+    if (rand() < chance) await put(pick(CARS), f.P(s + W / 2, back - L / 2), D, { turn: rand() < 0.15 ? Math.PI : 0, y: Y.path });
+  }
+}
+
+// Lot surfaces, flat, out to the pavement
+for (const [cell, g] of groups) {
+  const lawn = ['houses', 'townhouses', 'garden', 'flats'].includes(cell.id) || CIVIC[cell.id];
+  const paving = cell.id === 'shops' || cell.id === 'corner-shop';
+  if (!lawn && !paving && cell.id !== 'car-park') continue;
+  const ring = warpRing(parcelPlan(cell)), y = Y.land + (cell.order % 9) * 0.00003, flat = flatFor(g);
+  if (lawn) flat.polygon(ring, y, SW.lawn, GRASS);
+  else if (paving) flat.polygon(ring, y, zone(centreOf(cell)) < DOWNTOWN ? SW.plinthWarm : SW.plinth, [SURF.slabs, 1, 0]);
+  else flat.polygon(ring, y, SW.asphalt, [SURF.asphalt, 1, 0]);
+}
+
+// Frontages: runs of house, townhouse or shop cells side by side, facing the same way
+const runs = [], inRun = new Set();
+for (const cell of plan.cells) {
+  if (!['houses', 'townhouses', 'shops'].includes(cell.id) || inRun.has(cell)) continue;
+  const d = frontSide(cell), a = (d + 1) % 4, b = (d + 3) % 4;
+  const same = (k) => k && k.id === cell.id && frontSide(k) === d && !inRun.has(k);
+  let first = cell;
+  for (let k = cellAt(first.x + DIRS[b][0], first.z + DIRS[b][1]); same(k); k = cellAt(k.x + DIRS[b][0], k.z + DIRS[b][1])) first = k;
+  const cells = [];
+  for (let k = first; same(k); k = cellAt(k.x + DIRS[a][0], k.z + DIRS[a][1])) { cells.push(k); inRun.add(k); }
+  runs.push({ id: cell.id, cells, d });
+}
+
+const HOUSES = FAMILY, DRIVE = 0.09, SIDE = 0.05, SETBACK = 0.04;
+async function houseRun(run) {
+  const f = frameFor(run.cells, run.d), { P, F, n } = f;
+  const style = pick(['picket', 'picket', 'wood', 'hedge', 'hedge']);
+  // Plots: as many houses as fit, each with a driveway; the space left over is shared out
+  const plots = [];
+  let used = 0;
+  for (;;) {
+    let next = null;
+    for (const name of shuffle(HOUSES)) { const [w, dep] = await sizeOf(name); if (used + w + DRIVE + SIDE <= n + 1e-9) { next = { name, w, dep }; break; } }
+    if (!next) break;
+    plots.push(next); used += next.w + DRIVE + SIDE;
+  }
+  if (!plots.length) return;
+  const extra = (n - used) / plots.length;
+  let s = 0;
+  for (const [i, pl] of plots.entries()) {
+    const width = pl.w + DRIVE + SIDE + extra, m = (width - pl.w - DRIVE) / 2, driveFirst = rand() < 0.5;
+    const sHouse = s + m + (driveFirst ? DRIVE : 0) + pl.w / 2, sDrive = s + m + (driveFirst ? DRIVE / 2 : pl.w + DRIVE / 2);
+    const g = groupAt(P(sHouse, 0.5)), flat = flatFor(g), ext = f.ext(sHouse);
+    await put(pl.name, P(sHouse, SETBACK + pl.dep / 2), F, { building: true, g });
+    // A driveway from under the pavement to beside the house, and a path to the front door
+    clearPath(flat, P(sDrive, -f.ext(sDrive) - 0.02), P(sDrive, SETBACK + pl.dep * 0.8), 0.08, Y.path, SW.plinth, SURF.slabs);
+    clearPath(flat, P(sHouse, -ext - 0.02), P(sHouse, SETBACK), 0.028, Y.path, SW.paving, SURF.slabs);
+    if (rand() < 0.75) await put(pick(CARS.slice(0, 5)), P(sDrive, SETBACK - 0.02 + rand() * 0.12), F, { turn: rand() < 0.5 ? 0 : Math.PI, y: Y.path, g });
+    // Fences down the sides of the back garden, and along the back
+    const fenceFrom = SETBACK + pl.dep * 0.7;
+    fence(g, style, P(s, fenceFrom), P(s, 1));
+    if (i === plots.length - 1) fence(g, style, P(s + width, fenceFrom), P(s + width, 1));
+    fence(g, style, P(s, 1), P(s + width, 1));
+    // The back garden, and sometimes a tree out front
+    const garden = SETBACK + pl.dep + 0.1;
+    for (let k = 0; k < 1 + Math.floor(rand() * 2); k++) await put(pick(TREES), P(s + 0.06 + rand() * (width - 0.12), garden + rand() * (0.9 - garden)), F, { s: 0.75 + rand() * 0.35, turn: rand() * 6.28, g });
+    if (rand() < 0.4) await put(pick(['grill-round', 'dryer-outside', 'sand-box']), P(s + width * (0.3 + rand() * 0.4), garden + 0.04), F, { g });
+    if (rand() < 0.3) await put(pick(TREES), P(driveFirst ? sHouse + pl.w * 0.3 : sHouse - pl.w * 0.3, -ext * 0.45), F, { s: 0.8, turn: rand() * 6.28, g });
+    s += width;
+  }
+}
+async function townhouseRun(run) {
+  const f = frameFor(run.cells, run.d), { P, F, A, n } = f;
+  const style = pick(['picket', 'wood', 'hedge']);
+  const items = [];
+  let used = 0;
+  for (;;) {
+    const name = pick(TOWNHOUSES), [w, dep] = await sizeOf(name);
+    if (used + w > n * 0.96 && (used > n * 0.8 || used + w > n)) break;
+    items.push({ name, w, dep }); used += w;
+  }
+  const sc = Math.min(1.12, (n * 0.96) / used);
+  let s = (n - used * sc) / 2;
+  fence(groupAt(P(s, 0.9)), style, P(s, 1), P(n - s, 1));
+  for (const it of items) {
+    const w = it.w * sc, dep = it.dep * sc, mid = s + w / 2;
+    const g = groupAt(P(mid, 0.5)), flat = flatFor(g), ext = f.ext(mid);
+    await put(it.name, P(mid, 0.05 + dep / 2), F, { s: sc, building: true, g });
+    clearPath(flat, P(mid, -ext - 0.02), P(mid, 0.05), 0.026, Y.path, SW.paving, SURF.slabs);
+    fence(g, style, P(s, 0.05 + dep), P(s, 1));
+    if (rand() < 0.5) await put(pick(TREES), P(mid, 0.05 + dep + 0.12 + rand() * 0.15), F, { s: 0.7, turn: rand() * 6.28, g });
+    // A car parked at the kerb out front
+    const st = f.street(mid);
+    if (st && rand() < 0.45) await put(pick(CARS.slice(0, 5)), P(mid, -(ext - 0.03 + (st.pavement - st.road) / 2 + 0.04)), A, { turn: rand() < 0.5 ? 0 : Math.PI, y: Y.road, g });
+    s += w;
+  }
+  fence(groupAt(P(s, 0.5)), style, P(s, 0.5), P(s, 1));
+}
+async function shopRun(run) {
+  const f = frameFor(run.cells, run.d), { P, F, n } = f;
+  // Shopfronts wall to wall along the whole frontage, scaled a little to fill it
+  const items = [];
+  let used = 0;
+  for (let guard = 0; guard < 60 && used < n * 0.92; guard++) {
+    const name = pick(SHOPFRONTS), [w, dep] = await sizeOf(name);
+    if (used + w > n * 1.12) continue;
+    items.push({ name, w, dep }); used += w;
+  }
+  if (!items.length) return;
+  const sc = Math.max(0.85, Math.min(1.3, (n * 0.98) / used));
+  let s = (n - used * sc) / 2;
+  for (const it of items) {
+    const w = it.w * sc, dep = it.dep * sc, mid = s + w / 2, g = groupAt(P(mid, 0.5));
+    await put(it.name, P(mid, 0.005 + dep / 2), F, { s: sc, building: true, g });
+    if (rand() < 0.5) await put('bin-wheelie', P(s + 0.04 + rand() * (w - 0.08), dep + 0.05), F, { g });
+    s += w;
+  }
+  // A car park along the back
+  await bays(f, 0.05, n - 0.05, 0.98, F, 0.3);
+  // Out of the centre, the forecourt has parking too, nose in to the shops
+  if (run.cells.every((k) => zone(centreOf(k)) >= DOWNTOWN) && f.ext(n / 2) > 0.22) await bays(f, 0.05, n - 0.05, 0.0, [-F[0], -F[1]], 0.4);
+}
+
+// Lots laid out one cell at a time
+async function buildCell(cell, g) {
+  const fr = frameOf(cell), C = centreOf(cell);
   switch (cell.id) {
-    case 'shops':
-      paved(downtown);
-      await row(g, fr, F, shuffle(SHOPFRONTS), { setback: 0.02 });
-      if (rand() < 0.6) await place(pick(['bench-old', 'tree-pot', 'bin-wheelie', 'lamp-city']), lotPoint(fr, F, (rand() - 0.5) * 0.6, EDGE - 0.02), { rot: facing(F), y: KERB, parent: g });
-      break;
     case 'corner-shop': {
-      paved(downtown);
       // The corner block's fronts face +x and +z at rotation 0; this lot's fronts are sides rot and rot + 1
-      const a = cell.rot % 4, b = (cell.rot + 1) % 4, A = fr.dir(a), B = fr.dir(b);
-      const name = pick(CORNERS), [w, dd] = await sizeOf(name);
-      const p = [fr.o[0] + A[0] * (EDGE - 0.02 - w / 2) + B[0] * (EDGE - 0.02 - dd / 2), fr.o[1] + A[1] * (EDGE - 0.02 - w / 2) + B[1] * (EDGE - 0.02 - dd / 2)];
-      await place(name, p, { rot: facing(B), y: KERB, parent: g, building: true });
+      const a = cell.rot % 4, b = (cell.rot + 1) % 4, DA = DIRS[a], DB = DIRS[b];
+      const name = pick(CORNERS), [w, dep] = await sizeOf(name), sc = 1.15, cw = w * sc, cd = dep * sc;
+      const p = [C[0] + DA[0] * (0.5 - 0.005 - cw / 2) + DB[0] * (0.5 - 0.005 - cd / 2), C[1] + DA[1] * (0.5 - 0.005 - cw / 2) + DB[1] * (0.5 - 0.005 - cd / 2)];
+      await put(name, p, DB, { s: sc, building: true, g });
+      // A shopfront along the rest of one front, against the corner block
+      const fill = pick(SHOPFRONTS), [fw, fd] = await sizeOf(fill), fs = Math.min(1.25, (1 - cd - 0.01) / fw);
+      const q = [C[0] + DA[0] * (0.5 - 0.005 - fd * fs / 2) + DB[0] * (-cd / 2), C[1] + DA[1] * (0.5 - 0.005 - fd * fs / 2) + DB[1] * (-cd / 2)];
+      await put(fill, q, DA, { s: fs, building: true, g });
       break;
     }
-    case 'flats':
-      paved(false);
-      await row(g, fr, F, shuffle(FLATS), { setback: 0.06 });
-      await backGarden(g, fr, F, 2);
-      break;
-    case 'townhouses':
-      g.add(plinth(cell, SW.lawn, GRASS));
-      await row(g, fr, F, shuffle(TOWNHOUSES), { setback: 0.09 });
-      await backGarden(g, fr, F, 2);
-      break;
-    case 'houses': {
-      // Two plots of about 16 m, each a house behind a front garden
-      g.add(plinth(cell, SW.lawn, GRASS));
-      await row(g, fr, F, [pick(FAMILY), pick(FAMILY)], { setback: 0.14, gap: 0.08 });
-      for (const u of [-0.22, 0.22]) {
-        if (rand() < 0.5) await place(pick(TREES), lotPoint(fr, F, u + (rand() - 0.5) * 0.12, EDGE - 0.07), { y: KERB, s: 0.8, rot: rand() * 6.28, parent: g });
-        else if (rand() < 0.6) await place(pick(CARS.slice(0, 4)), lotPoint(fr, F, u + 0.15, EDGE - 0.1), { rot: facing(F), y: KERB, parent: g });
+    case 'flats': {
+      const d = frontSide(cell), f = frameFor([cell], d), { P, F } = f, flat = flatFor(g), ext = f.ext(0.5);
+      const driveFirst = rand() < 0.5, sDrive = driveFirst ? 0.07 : 0.93, lo = driveFirst ? 0.15 : 0.04, hi = driveFirst ? 0.96 : 0.85;
+      // Blocks along the front, each with a path to its door
+      const items = [];
+      for (const name of shuffle(FLATS)) {
+        const [w, dep] = await sizeOf(name), total = items.reduce((t, it) => t + it.w + 0.03, 0);
+        if (total + w <= hi - lo) items.push({ name, w, dep });
       }
-      await backGarden(g, fr, F, 2 + Math.floor(rand() * 2));
+      let s = lo + (hi - lo - items.reduce((t, it) => t + it.w + 0.03, -0.03)) / 2;
+      for (const it of items) {
+        await put(it.name, P(s + it.w / 2, 0.05 + it.dep / 2), F, { building: true, g });
+        clearPath(flat, P(s + it.w / 2, -f.ext(s + it.w / 2) - 0.02), P(s + it.w / 2, 0.05), 0.03, Y.path, SW.paving, SURF.slabs);
+        s += it.w + 0.03;
+      }
+      // A driveway down the side to a car park at the back
+      clearPath(flat, P(sDrive, -f.ext(sDrive) - 0.02), P(sDrive, 0.64), 0.09, Y.path, SW.asphalt, SURF.asphalt);
+      flat.polygon(warpRing([P(0.03, 0.62), P(0.97, 0.62), P(0.97, 0.97), P(0.03, 0.97)]), Y.path, SW.asphalt, [SURF.asphalt, 1, 0]);
+      await bays(f, 0.05, 0.95, 0.97, F, 0.4);
+      if (rand() < 0.7) await put(pick(TREES), P(driveFirst ? 0.8 : 0.2, -ext * 0.4), F, { s: 0.8, turn: rand() * 6.28, g });
       break;
     }
     case 'garden':
-      g.add(plinth(cell, SW.lawn, GRASS));
-      await scatter(g, fr, 3, TREES);
-      await place(pick(['grill-round', 'dryer-outside', 'sand-box']), lotPoint(fr, [0, 1], (rand() - 0.5) * 0.4, (rand() - 0.5) * 0.4), { y: KERB, rot: rand() * 6.28, parent: g });
+      await scatter(g, fr, 3, TREES, { y: LOT_Y });
+      await place(pick(['grill-round', 'dryer-outside', 'sand-box']), lotPoint(fr, [0, 1], (rand() - 0.5) * 0.4, (rand() - 0.5) * 0.4), { y: LOT_Y, rot: rand() * 6.28, parent: g });
       break;
     case 'car-park': {
-      g.add(plinth(cell, SW.asphalt, [SURF.asphalt, F[0], F[1]]));
+      const F = fr.dir(frontOf(cell));
       // Two rows of bays either side of an aisle that runs back from the street
-      const lines = makeFlat();
+      const lines = flatFor(g);
       for (const v of [0.22, -0.22]) {
         for (let k = 0; k <= 6; k++) {
           const u = -0.39 + k * 0.13;
-          lines.ribbon([lotPoint(fr, F, u, v - 0.12), lotPoint(fr, F, u, v + 0.12)], 0.008, KERB + 0.001, SW.white);
-          if (k < 6 && rand() < 0.72) await place(pick(CARS), lotPoint(fr, F, u + 0.065, v), { rot: facing(F) + (v > 0 ? 0 : Math.PI), y: KERB, parent: g });
+          lines.ribbon([lotPoint(fr, F, u, v - 0.12), lotPoint(fr, F, u, v + 0.12)], 0.008, Y.path, SW.white);
+          if (k < 6 && rand() < 0.72) await place(pick(CARS), lotPoint(fr, F, u + 0.065, v), { rot: facing(F) + (v > 0 ? 0 : Math.PI), y: Y.path, parent: g });
         }
       }
-      g.add(lines.mesh());
       break;
     }
     case 'park':
@@ -710,7 +926,7 @@ async function buildLot(cell) {
       await scatter(g, fr, 2, ['tree-lime', 'tree-round'], { y: Y.land, avoidPaths: true });
       break;
     case 'fountain':
-      paved(true);
+      g.add(plinth(cell, SW.plinthWarm, [SURF.slabs, 1, 0]));
       await place('fountain', fr.o, { s: 2.4, y: KERB, parent: g });
       for (let k = 0; k < 4; k++) {
         const D = fr.dir(k);
@@ -721,15 +937,39 @@ async function buildLot(cell) {
       break;
     default:
       if (CIVIC[cell.id]) {
-        paved(true);
-        await row(g, fr, F, [CIVIC[cell.id]], { setback: 0.08 });
-        await backGarden(g, fr, F, 2);
+        // The building set back behind a paved forecourt that runs out to the pavement
+        const d = frontSide(cell), f = frameFor([cell], d), { P, F } = f, flat = flatFor(g);
+        const name = CIVIC[cell.id], [w, dep] = await sizeOf(name), sc = Math.min(1, 0.9 / w), bw = w * sc, bd = dep * sc;
+        await put(name, P(0.5, 0.12 + bd / 2), F, { s: sc, building: true, g });
+        const ext = Math.max(f.ext(0.5 - bw / 2 - 0.05), f.ext(0.5), f.ext(0.5 + bw / 2 + 0.05));
+        flat.polygon(warpRing([P(0.5 - bw / 2 - 0.05, -ext - 0.02), P(0.5 + bw / 2 + 0.05, -ext - 0.02), P(0.5 + bw / 2 + 0.05, 0.14), P(0.5 - bw / 2 - 0.05, 0.14)]), Y.path, SW.plinthWarm, [SURF.slabs, 1, 0]);
+        keepClear.push({ pts: [warp(P(0.5 - bw / 2, -ext)), warp(P(0.5 + bw / 2, -ext))], r: 0.3 });
+        for (const side of [-1, 1]) await put('lamp-city', P(0.5 + side * (bw / 2 + 0.02), -ext + 0.04), F, { g });
+        for (let k = 0; k < 3; k++) await put(pick(TREES), P(0.1 + rand() * 0.8, 0.12 + bd + 0.08 + rand() * Math.max(0.02, 0.75 - bd - 0.08)), F, { s: 0.8 + rand() * 0.3, turn: rand() * 6.28, g });
       }
   }
-  city.add(g);
-  cellGroups.push(g);
 }
-for (const cell of plan.cells) if (cell.kind !== 'road' && cell.kind !== 'main') await buildLot(cell);
+for (const run of runs) await (run.id === 'houses' ? houseRun : run.id === 'townhouses' ? townhouseRun : shopRun)(run);
+for (const [cell, g] of groups) if (!inRun.has(cell)) await buildCell(cell, g);
+for (const [g, flat] of flats) g.add(flat.mesh());
+for (const [g, segs] of fenceSegs) buildFences(g, segs);
+
+// ---------------------------------------------------------------- street trees
+// In the front gardens along residential streets, clear of driveways and paths, and not in
+// front of shops, car parks or civic buildings
+{
+  const clearOfDrives = (p) => keepClear.every(({ pts, r }) => { for (let i = 0; i < pts.length - 1; i++) if (segDist(p, pts[i], pts[i + 1]) < r) return false; return true; });
+  for (const st of streets) {
+    if (st.cls !== 'r' || st.downtown) continue;
+    for (const [p, t] of along({ ...st, pts: st.plan }, 0.32, 0.48)) for (const side of [-1, 1]) {
+      if (rand() >= 0.5) continue;
+      const q = [p[0] - t[1] * side * 0.37, p[1] + t[0] * side * 0.37];
+      const lot = cellAt(Math.round(q[0] - t[1] * side * 0.25 + c), Math.round(q[1] + t[0] * side * 0.25 + c));
+      if (lot && (['shops', 'corner-shop', 'car-park', 'flats'].includes(lot.id) || CIVIC[lot.id])) continue;
+      if (clearOfDrives(warp(q))) await place(pick(['tree-round', 'tree-lime', 'tree-elipse']), warp(q), { s: 0.8 + rand() * 0.3, rot: rand() * 6.28 });
+    }
+  }
+}
 
 // ---------------------------------------------------------------- the plan as a little map
 const COLOURS = {
