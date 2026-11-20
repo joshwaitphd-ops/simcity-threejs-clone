@@ -15,6 +15,9 @@ These are throwaway pages that render city ideas with the game's own models, pal
 | `city.html` | City v1: a 32×32 town built from a text map |
 | `city2.html` | City v2: several buildings per lot, less downtown parking, Chinatown, strip malls with parking in front |
 | `organic.html` | The city without a grid, built from real Santa Fe streets, building footprints, parks and river (`osm/santafe.json`) |
+| `town.html` | A town made by Wave Function Collapse instead of from real data: a fresh town for every `?seed=`. See **Procedural town** below |
+| `lib/townPlan.js` | The town planner behind `town.html`: the WFC solver and its module catalogue. No three.js, so it runs in Node too |
+| `lib/look.js` | Ground and building textures, shared by `organic.html` and `town.html` |
 | `ground/` | Detail textures for the ground in `organic.html`: `grass.jpg` is Grass 23 from Screaming Brain Studios' Tiny Texture Pack 1. From Poly Haven: `pavers.jpg` is Square Concrete Pavers and `asphalt.jpg` is Asphalt 02. All CC0, reduced to 512 px |
 | `buildings/` | Detail textures for buildings in `organic.html`, all from Poly Haven: `brick.jpg` (Large Red Bricks), `plaster.jpg` (White Plaster 02), `roof-flat.jpg` (Tarred Gravel) and `roof-tiles.jpg` (Grey Roof Tiles 02). All CC0, reduced to 512 px |
 | `maps/` | The text maps behind v1 and v2. One character per tile, with the legend at the bottom |
@@ -31,11 +34,39 @@ These are throwaway pages that render city ideas with the game's own models, pal
 npm run prototype
 ```
 
-Then open http://127.0.0.1:3001/organic.html?live for the Santa Fe city, or http://127.0.0.1:3001/city2.html?live for the grid city. Drag to pan, right-drag to rotate, scroll to zoom.
+Then open http://127.0.0.1:3001/town.html?live for a procedural town, http://127.0.0.1:3001/organic.html?live for the Santa Fe city, or http://127.0.0.1:3001/city2.html?live for the grid city. Drag to pan, right-drag to rotate, scroll to zoom.
 
 Add `&ground=flat`, `&ground=procedural` or `&ground=textures` (the default) to switch how the ground is drawn, and `&buildings=flat` to turn off the building textures. See **Ground and building detail** below.
 
 The Santa Fe city runs the 3-minute day/night cycle. The slider at the bottom sets the time of day, and its button pauses the clock. The slider is a demo feature only: remove the parts marked `DEMO` in `organic.html` when it's no longer needed.
+
+## Procedural town
+
+`town.html` makes a town from a seed, with Wave Function Collapse (WFC), ideas taken from [wass08/wfc-magic-school](https://github.com/wass08/wfc-magic-school). It's built around the kit, so nothing has to be squeezed onto plots that don't fit it.
+
+**The plan** (`lib/townPlan.js`). The map is a grid of 32 m cells. Every module (a street, a bend, a junction, a lot of shops or houses, a park, woods, a landmark) has a socket on each side, and two cells can sit side by side only if their sockets fit:
+
+- a lot's front must face the side of a street
+- a lot's back can't face a street, so blocks are lots back to back
+- two streets never run side by side without joining
+
+Then, on top of plain WFC:
+
+- **Fixed constraints:** the courthouse square, its ring road and 3 or 4 main streets are placed first.
+- **Weights by place:** shops downtown and on main streets, then flats, townhouses and houses, then woods.
+- **Affinity:** parks, woods, shops and each kind of housing cluster, so streets get a character.
+- **Spacing:** junctions keep 2 cells apart, and no street runs 2 cells from a parallel street, so blocks are long enough for a row of lots, 2 deep.
+- **No tiny loops:** no 2×2 patch of road. Propagation enforces this: when 3 cells of a 2×2 can only be roads, the 4th can't be one.
+- **Soft size cap** on parks, and **one of each landmark** (town hall, bank, school, fire station, police, hospital, data centre).
+- **Restarts:** a plan that contradicts itself, or whose streets don't all connect, is dropped. Of 6 working plans, the one with the fewest defects is kept. A 25×25 town takes 0.1–2.5 s.
+
+**Drawing it.** A gentle, smooth warp bends the whole grid, so streets curve a little while lots keep their shape (`?warp=0` for straight streets). Streets are traced from junction to junction and drawn as textured ribbons, with rounded bends and round junctions. Downtown streets get pavements wall to wall. Lots get a raised base sized to the cell, and buildings in a row along their front, using city2's lot rules. Every house lot holds 2 houses, so plots are about 16 m wide.
+
+**In the browser** (`?live`): a minimap of the plan, with a tick on each lot's front; **Watch it build**, which raises the lots in the order the solver decided them; **New town**; straight or bent streets; and the day/night cycle. `?size=` changes the grid (odd numbers), and `?ground=`, `?buildings=` and `?texscale=` work as in `organic.html`.
+
+To try the planner without a browser: `node -e "import('./lib/townPlan.js').then(({ planTown }) => console.log(planTown({ seed: 5 }).map))"`
+
+Renders: `renders/town-seed<n>-*.jpg`, and `renders/town-seed1-map.png` for the plan.
 
 ## Ground and building detail
 
@@ -80,7 +111,7 @@ python3 tools/sheet_server.py . out 5 600 &      # expect 5 images, give up afte
   http://127.0.0.1:8765/city2.html
 ```
 
-The number of images each page posts: `contact-sheet` 5, `roads` 1, `mock` 4, `mock2` 4, `city` 5, `city2` 5, `organic` 5. Add `?ground=…` or `?buildings=flat` to the URL to render one style. Stop Chrome once the server prints `done`.
+The number of images each page posts: `contact-sheet` 5, `roads` 1, `mock` 4, `mock2` 4, `city` 5, `city2` 5, `organic` 5, `town` 6 (with its map, as `town-map.txt` and `town-map.png`). Add `?ground=…` or `?buildings=flat` to the URL to render one style. Stop Chrome once the server prints `done`.
 
 ## What we learnt
 
