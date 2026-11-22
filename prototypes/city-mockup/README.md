@@ -42,6 +42,12 @@ The Santa Fe city runs the 3-minute day/night cycle. The slider at the bottom se
 
 ## Procedural town
 
+**Status: parked, 22 November 2026.** This is #7 Procedural town on the Notion dev log. Where it stopped:
+
+- Done: zones (core, residential, industrial, rural), the coast and port, every critical infrastructure site from the zones review, power lines and phone masts.
+- Rough edges: wind turbines are scattered rather than grouped into a farm; a few solar cells sit alone in corners; some fields fall inside the industrial zone; the airfield is squeezed into one cell.
+- Not yet: the game in `src/` still uses the old grid. Nothing here is wired into it.
+
 `town.html` makes a coastal town from a seed, with Wave Function Collapse (WFC), ideas taken from [wass08/wfc-magic-school](https://github.com/wass08/wfc-magic-school). It's built around the kit, so nothing has to be squeezed onto plots that don't fit it. The map is 35 × 35 cells of 32 m, about 1.1 km across.
 
 **Zones** come first, from the seed: a commercial core round the courthouse square, residential rings, an industrial wedge running down to the coast, farmland round the edge, and the sea along one side with a wandering coastline. Every module is weighted by zone.
