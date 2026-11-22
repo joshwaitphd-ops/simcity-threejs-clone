@@ -42,49 +42,40 @@ The Santa Fe city runs the 3-minute day/night cycle. The slider at the bottom se
 
 ## Procedural town
 
-`town.html` makes a town from a seed, with Wave Function Collapse (WFC), ideas taken from [wass08/wfc-magic-school](https://github.com/wass08/wfc-magic-school). It's built around the kit, so nothing has to be squeezed onto plots that don't fit it.
+`town.html` makes a coastal town from a seed, with Wave Function Collapse (WFC), ideas taken from [wass08/wfc-magic-school](https://github.com/wass08/wfc-magic-school). It's built around the kit, so nothing has to be squeezed onto plots that don't fit it. The map is 35 × 35 cells of 32 m, about 1.1 km across.
 
-**The plan** (`lib/townPlan.js`). The map is a grid of 32 m cells. Every module (a street, a bend, a junction, a lot of shops or houses, a park, woods, a landmark) has a socket on each side, and two cells can sit side by side only if their sockets fit:
+**Zones** come first, from the seed: a commercial core round the courthouse square, residential rings, an industrial wedge running down to the coast, farmland round the edge, and the sea along one side with a wandering coastline. Every module is weighted by zone.
 
-- a lot's front must face the side of a street
-- a lot's back can't face a street, so blocks are lots back to back
-- two streets never run side by side without joining
+**The plan** (`lib/townPlan.js`). Every module (a street, a lot, a field, the sea) has a socket on each side, and two cells can sit side by side only if their sockets fit: a lot's front must face a street, a lot's back can't, streets never run side by side without joining, and only a beach or a port's quay faces the sea. On top of plain WFC:
 
-Then, on top of plain WFC:
+- **Fixed constraints:** the square, its ring road, an outer loop road whose south side is the esplanade, main streets out to the edge and down to the esplanade, and the sea are placed first.
+- **Weights by zone, affinity** (like attracts like), **spacing** (junctions, substations, supermarkets, petrol stations and water towers keep apart), a **soft size cap** on parks and farms, and **one of each landmark**.
+- **No 2×2 patch of road**, enforced during propagation.
+- **Required buildings:** every critical infrastructure site must appear. One the solver left out is put in by changing a filler lot with the same sockets, in the right zone.
+- **Stranded streets** that don't reach the main roads are joined where they run beside one, or cleared and the patch solved again without streets ("modifying in blocks", as in wfc-magic-school).
+- Domains are bitsets, so a town takes about 0.05–0.2 s to plan.
 
-- **Fixed constraints:** the courthouse square, its ring road and 3 or 4 main streets are placed first.
-- **Weights by place:** shops downtown and on main streets, then flats, townhouses and houses, then woods.
-- **Affinity:** parks, woods, shops and each kind of housing cluster, so streets get a character.
-- **Spacing:** junctions keep 2 cells apart, and no street runs 2 cells from a parallel street, so blocks are long enough for a row of lots, 2 deep.
-- **No tiny loops:** no 2×2 patch of road. Propagation enforces this: when 3 cells of a 2×2 can only be roads, the 4th can't be one.
-- **Soft size cap** on parks, and **one of each landmark** (town hall, bank, school, fire station, police, hospital, data centre).
-- **Restarts:** a plan that contradicts itself, or whose streets don't all connect, is dropped. Of 6 working plans, the one with the fewest defects is kept. A 25×25 town takes 0.1–2.5 s.
+**Critical infrastructure**, by zone (map letters in brackets):
 
-**Drawing it.** A gentle, smooth warp bends the whole grid, so streets curve a little while lots keep their shape (`?warp=0` for straight streets). Streets are traced from junction to junction and drawn as textured ribbons, with rounded bends and round junctions. Downtown streets get pavements wall to wall. Repeated points where two curves meet are dropped, as they used to double the street's width there and leave spikes. Lots lie flat and reach out to the pavement on every side that faces a street, so neighbouring lots meet with no gaps and there's no strip of verge between a lot and its street. Lots are laid out along the street rather than one per cell: a run of cells of the same kind facing the same street is one frontage, cut into plots sized to the kit:
+| Zone | Buildings |
+|---|---|
+| Commercial | shops, supermarkets (U), petrol stations (g), telephone exchange (L), broadcast studio (N), energy market operator and payment systems as local offices (J, I), station and bus depot (C), bank, town hall, police |
+| Residential | houses, townhouses, flats, water towers (v), pumping station (k), zone substations (e), school, hospital, fire station |
+| Industrial | factories, warehouses, power station (E), gas plant (G), fuel terminal (F), freight yard (Y), food distribution (d), data centre (D), sewage works (Z), the port (K) |
+| Rural | fields, farms, wind turbines (n), solar farm (o), reservoir (r), water treatment (V), transmitter mast (x), airfield (A), woods |
+| Coast | beaches with a surf club (s), the port, boats |
 
-- **Houses:** each plot is a house, a driveway beside it and a little space either side, so plot widths vary with the house. Each gets a driveway and a path from the pavement, usually a car on the drive, and picket fences, wooden fences or hedges round the back garden.
-- **Townhouses:** wall to wall, a path to each front door, cars parked at the kerb, and fenced back yards.
-- **Shops:** one continuous row of shopfronts on the pavement, bins at the back and a car park behind. Away from the centre, cars also park on the forecourt.
-- **Flats:** blocks along the front with paths to their doors, and a driveway down the side to a car park at the back.
-- **Civic buildings:** set back behind a paved forecourt with lamps.
+The kit's models are used where it has them. What it lacks (wind turbines, solar arrays, substations, phone masts, the transmitter mast, water tower, pumping station, treatment works, fuel tanks, gas spheres, petrol station, supermarket, farm buildings, port cranes, rail track, hangar, poles, dam) is built from simple shapes in `lib/assets.js`, coloured from the kit's palette so it takes the same textures and lighting.
 
-Street trees go in the front gardens of residential streets, clear of driveways and paths.
+**Networks:** power lines run from the power station and the wind and solar farms to every substation, on the shortest routes that follow streets: wooden poles along streets, pylons across fields. A phone mast stands about every 200 m.
 
-**Park paths** go where people would walk. Each park (park cells side by side) gets entrances only where a street runs along its edge, as far apart as possible, then a path from each to a hub near its middle:
+**Drawing it.** A gentle warp bends the grid. Streets are traced from junction to junction and drawn as textured ribbons with rounded bends and junctions. Lots lie flat and reach the pavement, laid out along each street: houses with driveways, paths and fenced gardens; shops in one row with car parks behind. Fields are sown in rows, a paddock at a time, with hedgerows. The sea's edge is smoothed so it never cuts into land, with shallows and a strip of sand.
 
-- 2 entrances: one path through, street to street, with a bench beside it
-- 1, or 3 and more: the paths meet at a small round seating area with benches
-- none: no paths (a park enclosed by lots stays plain grass)
-
-Paths take the most direct line that stays in the park, and curve round corners. An entrance whose path would wander round a corner is left out if there are others. The courthouse square gets paths from the middle of each side and each corner to the fountain. Trees keep off paths.
-
-**In the browser** (`?live`): a minimap of the plan, with a tick on each lot's front; **Watch it build**, which raises the lots in the order the solver decided them; **New town**; and the day/night cycle.
-
-For checking: `?debug` logs sharp corners in streets, street ends that aren't at a junction, and how many park paths there are. Without `?live`, `?shot=x,z,half` renders one view centred on plan cell (x, z). `?size=` changes the grid (odd numbers), and `?ground=`, `?buildings=` and `?texscale=` work as in `organic.html`.
+**In the browser** (`?live`): a minimap of the plan, **Watch it build**, **New town**, and the day/night cycle. `?size=` changes the grid (odd numbers); `?ground=`, `?buildings=` and `?texscale=` work as in `organic.html`; `?debug` logs street and path checks; without `?live`, `?shot=x,z,half` renders one view.
 
 To try the planner without a browser: `node -e "import('./lib/townPlan.js').then(({ planTown }) => console.log(planTown({ seed: 5 }).map))"`
 
-Renders: `renders/town-seed<n>-*.jpg` (`town-seed1-houses.jpg` and `town-seed1-downtown.jpg` close up), and `renders/town-seed1-map.png` for the plan. `town` posts 1 image with `?shot=`.
+Renders: `renders/town-seed1-{whole,square,industry,port,country,closeup}.jpg`, `renders/town-seed{2,3}-whole.jpg`, and `renders/town-seed1-map.png` for the plan.
 
 ## Ground and building detail
 
@@ -129,7 +120,7 @@ python3 tools/sheet_server.py . out 5 600 &      # expect 5 images, give up afte
   http://127.0.0.1:8765/city2.html
 ```
 
-The number of images each page posts: `contact-sheet` 5, `roads` 1, `mock` 4, `mock2` 4, `city` 5, `city2` 5, `organic` 5, `town` 6 (with its map, as `town-map.txt` and `town-map.png`). Add `?ground=…` or `?buildings=flat` to the URL to render one style. Stop Chrome once the server prints `done`.
+The number of images each page posts: `contact-sheet` 5, `roads` 1, `mock` 4, `mock2` 4, `city` 5, `city2` 5, `organic` 5, `town` 8 (with its map, as `town-map.txt` and `town-map.png`). Add `?ground=…` or `?buildings=flat` to the URL to render one style. Stop Chrome once the server prints `done`.
 
 ## What we learnt
 

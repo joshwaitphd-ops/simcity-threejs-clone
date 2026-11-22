@@ -53,6 +53,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { DayNightCycle, addWindowLights, createWindowLights } from './scripts/dayNight.js';
 import { SURF, PLAIN, GRASS, createLook } from './lib/look.js';
 import { planTown, DIRS, LEGEND } from './lib/townPlan.js';
+import * as ASSETS from './lib/assets.js';
 
 // ?live draws the town in the window; without it the page renders images for sheet_server.py.
 // ?seed= picks the town, ?size= the number of cells along a side (odd), ?warp=0 keeps streets straight.
@@ -64,7 +65,7 @@ const WARP = params.get('warp') === '0' ? 0 : 0.3;
 
 // ---------------------------------------------------------------- the plan
 // Wave Function Collapse decides every cell (lib/townPlan.js). Each cell is 1 unit, 32 m.
-const plan = planTown({ size: Number(params.get('size')) || 25, seed: SEED });
+const plan = planTown({ size: Number(params.get('size')) || 35, seed: SEED });
 const N = plan.size, c = (N - 1) / 2;
 const cellAt = (x, z) => (x < 0 || z < 0 || x >= N || z >= N ? null : plan.cells[z * N + x]);
 const isRoad = (s) => s === 'r' || s === 'm';
@@ -72,7 +73,9 @@ const roadSides = (cell) => [0, 1, 2, 3].filter((d) => isRoad(cell.sides[d]));
 const centreOf = (cell) => [cell.x - c, cell.z - c];
 // Distance from the middle of town, 0 to 1, as the planner measures it
 const zone = ([x, z]) => Math.min(1, Math.hypot(x, z) / (N / 2));
-const DOWNTOWN = 0.42;
+// The planner's zone of the cell under a plan point; downtown is the commercial core
+const zoneAt = ([x, z]) => cellAt(Math.round(x + c), Math.round(z + c))?.zone;
+const downtownAt = (p) => zoneAt(p) === 'core';
 
 // ---------------------------------------------------------------- the warp
 // The whole grid is bent by a smooth, gentle noise field, so streets curve a little while lots and
@@ -108,6 +111,8 @@ const swatch = (col, row) => [(col + 0.5) / 8, (row + 0.5) / 8];
 const SW = {
   ground: swatch(7, 4), park: swatch(4, 4), lawn: swatch(3, 4), asphalt: swatch(1, 2), pavement: swatch(4, 2),
   paving: swatch(5, 1), line: swatch(5, 3), white: swatch(1, 7), plinth: swatch(6, 2), plinthWarm: swatch(6, 1), kerb: swatch(5, 2),
+  sand: swatch(6, 1), sea: swatch(2, 5), shallows: swatch(3, 5), water: swatch(3, 5), gravel: swatch(4, 2), concrete: swatch(5, 2),
+  wheat: swatch(4, 1), crop: swatch(5, 4), ploughed: swatch(2, 1), pasture: swatch(4, 4), runway: swatch(1, 2), dirt: swatch(3, 1),
 };
 const { groundMaterial, addBuildingDetail } = await createLook({
   material, M, seed: SEED,
@@ -221,12 +226,19 @@ function addLights(building) {
   addBuildingDetail(own);
   building.traverse((o) => { if (o.isMesh) o.material = own; });
 }
+// The custom infrastructure (lib/assets.js) shares one material, with window lights and textures
+const assetMaterial = material.clone();
+addWindowLights(assetMaterial, createWindowLights());
+addBuildingDetail(assetMaterial);
 // Place a model centred on (x, z), standing on y, facing `rot` radians (its front is +z at 0)
-async function place(name, [x, z], { rot = 0, s = 1, y = 0, parent = city, building = false } = {}) {
+// `fit` scales it so its longer side across is that long
+async function place(name, [x, z], { rot = 0, s = 1, y = 0, parent = city, building = false, fit } = {}) {
   const m = await model(name);
   m.scale.setScalar(s / 30);
   m.rotation.y = rot;
-  const box = new THREE.Box3().setFromObject(m), ctr = box.getCenter(new THREE.Vector3());
+  let box = new THREE.Box3().setFromObject(m);
+  if (fit) { const size = box.getSize(new THREE.Vector3()); m.scale.multiplyScalar(fit / Math.max(size.x, size.z)); box = new THREE.Box3().setFromObject(m); }
+  const ctr = box.getCenter(new THREE.Vector3());
   m.position.set(x - ctr.x, y - box.min.y, z - ctr.z);
   if (building) addLights(m);
   parent.add(m);
@@ -292,7 +304,7 @@ const streets = [];
     }
     dense.push(pts.at(-1));
     const mid = pts[Math.floor(pts.length / 2)];
-    const downtown = zone(mid) < DOWNTOWN;
+    const downtown = downtownAt(mid);
     // plan: the line before the warp, for working out where park paths meet the street
     streets.push({ cls, plan: dense, pts: dense.map(warp), startNode: true, endNode, downtown, ...ROAD[cls], pavement: downtown ? 0.9 : ROAD[cls].pavement });
   }
@@ -350,16 +362,40 @@ function pavementGap(p, dir, max = 0.5) {
   return null;
 }
 
+// ---------------------------------------------------------------- the coastline
+// The sea is every cell south of the coast. Its edge is a smooth line: the stepped edge of the
+// sea cells, widened by half a cell and then averaged, so it only ever adds land and never cuts
+// into a land cell. waterline(x) is the plan z of the shore at plan x.
+const waterline = (() => {
+  const edge = Array.from({ length: N }, (_, col) => {
+    let z = N;
+    for (let row = N - 1; row >= 0; row--) if (cellAt(col, row).kind === 'sea') z = row; else break;
+    return z - 0.5 - c;
+  });
+  const stair = (x) => edge[Math.max(0, Math.min(N - 1, Math.round(x + c)))];
+  const step = 0.05, xs = [], maxed = [];
+  for (let x = -N / 2 - 1; x <= N / 2 + 1; x += step) xs.push(x);
+  for (const x of xs) { let m = -Infinity; for (let y = x - 0.5; y <= x + 0.5; y += step) m = Math.max(m, stair(y)); maxed.push(m); }
+  const smooth = xs.map((_, i) => { let s = 0, k = 0; for (let j = i - 10; j <= i + 10; j++) if (maxed[j] !== undefined) { s += maxed[j]; k++; } return s / k; });
+  return (x) => { const i = Math.max(0, Math.min(xs.length - 1, Math.round((x - xs[0]) / step))); return smooth[i]; };
+})();
+const hasSea = plan.cells.some((k) => k.kind === 'sea');
+
 // ---------------------------------------------------------------- parcels
 // Lots, parks and the square reach out to the pavement on every side that faces a street, so
 // there's no strip of verge between them and the street. ext[d] is how far side d reaches past
 // its cell's edge, and street[d] the street it meets.
 const parcels = new Map();
 for (const cell of plan.cells) {
-  if (cell.kind === 'road' || cell.kind === 'main') continue;
+  if (cell.kind === 'road' || cell.kind === 'main' || cell.kind === 'sea') continue;
   const C = centreOf(cell), ext = [0, 0, 0, 0], street = [null, null, null, null];
   for (let d = 0; d < 4; d++) {
     const n = cellAt(cell.x + DIRS[d][0], cell.z + DIRS[d][1]);
+    if (n?.kind === 'sea') {
+      // Out to the shore, leaving a strip of sand (a port's quay goes right to the water)
+      if (d === 1) ext[d] = Math.max(0, waterline(C[0]) - (C[1] + 0.5) - (cell.id === 'port' ? 0 : 0.08));
+      continue;
+    }
     if (!n || (n.kind !== 'road' && n.kind !== 'main')) continue;
     const gap = pavementGap([C[0] + DIRS[d][0] * 0.5, C[1] + DIRS[d][1] * 0.5], DIRS[d]);
     ext[d] = gap ? gap.t + 0.03 : 0.25;
@@ -387,6 +423,15 @@ function warpRing(corners, steps = 4) {
 const ground = makeFlat();
 const half = N / 2;
 ground.polygon([[-half, -half], [half, -half], [half, half], [-half, half]], Y.ground, SW.ground, GRASS);
+if (hasSea) {
+  // The sea, a band of shallows along the shore, and a strip of sand
+  const shore = [];
+  for (let x = -half; x <= half + 1e-6; x += 0.1) shore.push([x, waterline(x)]);
+  const SEA_Y = Y.ground + 0.002;
+  ground.polygon([...shore, [half, half], [-half, half]].map(warp), SEA_Y, SW.sea, PLAIN);
+  ground.ribbon(shore.map(([x, z]) => warp([x, z + 0.16])), 0.32, SEA_Y + 0.0004, SW.shallows);
+  ground.ribbon(shore.map(([x, z]) => warp([x, z - 0.05])), 0.12, SEA_Y + 0.0006, SW.sand);
+}
 for (const cell of plan.cells) if (cell.id === 'park' || cell.id === 'square') ground.polygon(warpRing(parcelPlan(cell)), Y.land, SW.park, GRASS);
 
 // ---------------------------------------------------------------- park paths
@@ -670,7 +715,7 @@ async function benches(g, cell) {
 const cellGroups = [];
 const groups = new Map();
 for (const cell of plan.cells) {
-  if (cell.kind === 'road' || cell.kind === 'main') continue;
+  if (cell.kind === 'road' || cell.kind === 'main' || cell.kind === 'sea') continue;
   const g = new THREE.Group();
   g.userData.order = cell.order;
   groups.set(cell, g); city.add(g); cellGroups.push(g);
@@ -696,6 +741,7 @@ const FENCE_STYLES = {
   picket: { colour: 0xf1ede2, h: 0.03, t: 0.006 },
   wood: { colour: 0x8c6a48, h: 0.04, t: 0.007 },
   hedge: { colour: 0x3d6b33, h: 0.032, t: 0.024 },
+  chain: { colour: 0x9d9a98, h: 0.045, t: 0.003 },
 };
 const fenceMaterials = Object.fromEntries(Object.entries(FENCE_STYLES).map(([k, v]) => [k, new THREE.MeshLambertMaterial({ color: v.colour })]));
 function fence(g, style, a, b) {
@@ -718,8 +764,8 @@ function buildFences(g, segs) {
   }
 }
 // Places a model at plan point p, its front facing plan direction D
-function put(name, p, D, { turn = 0, s = 1, y = LOT_Y, building = false, g } = {}) {
-  return place(name, warp(p), { rot: facing(wdir(p, D)) + turn, s, y, parent: g ?? groupAt(p), building });
+function put(name, p, D, { turn = 0, s = 1, y = LOT_Y, building = false, g, fit } = {}) {
+  return place(name, warp(p), { rot: facing(wdir(p, D)) + turn, s, y, parent: g ?? groupAt(p), building, fit });
 }
 
 // A frontage along cells (in order along direction d + 1), facing side d. P(s, depth) is the plan
@@ -745,14 +791,23 @@ async function bays(f, s0, s1, back, D, chance = 0.6) {
   }
 }
 
-// Lot surfaces, flat, out to the pavement
+// Lot surfaces, flat, out to the pavement: lawn, paving, concrete yards, asphalt or sand
+const SURFACES = {
+  lawn: ['houses', 'townhouses', 'garden', 'flats', 'water-tower', 'pumping-station', 'farm', 'airfield', 'town-hall', 'bank', 'school', 'fire-station', 'police', 'hospital'],
+  paving: ['shops', 'corner-shop'],
+  concrete: ['factory', 'warehouse', 'power-station', 'gas-plant', 'fuel-terminal', 'freight-yard', 'food-distribution', 'data-centre', 'sewage-works', 'water-treatment', 'substation', 'port', 'exchange', 'studio', 'energy-office', 'payments-office', 'station'],
+  asphalt: ['car-park', 'petrol', 'supermarket'],
+  sand: ['beach'],
+};
+const surfaceOf = Object.fromEntries(Object.entries(SURFACES).flatMap(([s, ids]) => ids.map((id) => [id, s])));
 for (const [cell, g] of groups) {
-  const lawn = ['houses', 'townhouses', 'garden', 'flats'].includes(cell.id) || CIVIC[cell.id];
-  const paving = cell.id === 'shops' || cell.id === 'corner-shop';
-  if (!lawn && !paving && cell.id !== 'car-park') continue;
+  const kind = surfaceOf[cell.id];
+  if (!kind) continue;
   const ring = warpRing(parcelPlan(cell)), y = Y.land + (cell.order % 9) * 0.00003, flat = flatFor(g);
-  if (lawn) flat.polygon(ring, y, SW.lawn, GRASS);
-  else if (paving) flat.polygon(ring, y, zone(centreOf(cell)) < DOWNTOWN ? SW.plinthWarm : SW.plinth, [SURF.slabs, 1, 0]);
+  if (kind === 'lawn') flat.polygon(ring, y, SW.lawn, GRASS);
+  else if (kind === 'paving') flat.polygon(ring, y, downtownAt(centreOf(cell)) ? SW.plinthWarm : SW.plinth, [SURF.slabs, 1, 0]);
+  else if (kind === 'concrete') flat.polygon(ring, y, SW.concrete, [SURF.slabs, 1, 0]);
+  else if (kind === 'sand') flat.polygon(ring, y, SW.sand, PLAIN);
   else flat.polygon(ring, y, SW.asphalt, [SURF.asphalt, 1, 0]);
 }
 
@@ -856,8 +911,207 @@ async function shopRun(run) {
   // A car park along the back
   await bays(f, 0.05, n - 0.05, 0.98, F, 0.3);
   // Out of the centre, the forecourt has parking too, nose in to the shops
-  if (run.cells.every((k) => zone(centreOf(k)) >= DOWNTOWN) && f.ext(n / 2) > 0.22) await bays(f, 0.05, n - 0.05, 0.0, [-F[0], -F[1]], 0.4);
+  if (run.cells.every((k) => !downtownAt(centreOf(k))) && f.ext(n / 2) > 0.22) await bays(f, 0.05, n - 0.05, 0.0, [-F[0], -F[1]], 0.4);
 }
+
+// A custom asset at plan point p, its front facing plan direction D
+function asset(mesh, p, D, { g, turn = 0, y = LOT_Y } = {}) {
+  const o = warp(p);
+  mesh.position.set(o[0], y, o[1]);
+  mesh.rotation.y = facing(wdir(p, D)) + turn;
+  (g ?? groupAt(p)).add(mesh);
+  return mesh;
+}
+// The top of a placed model
+const topOf = (m) => new THREE.Box3().setFromObject(m).max.y;
+// A chain-link fence round the rectangle from (s0, d0) to (s1, d1) in a lot's frame
+const fenceRect = (g, P, s0, d0, s1, d1, style = 'chain') => {
+  const pts = [P(s0, d0), P(s1, d0), P(s1, d1), P(s0, d1)];
+  pts.forEach((a, i) => fence(g, style, a, pts[(i + 1) % 4]));
+};
+const CONTAINERS = ['cargo-shipping_blue', 'cargo-shipping_red', 'cargo-shipping_orange', 'cargo-shipping_green', 'cargo-shipping_white'];
+// Cells that make electricity, for the power lines
+const generation = [];
+
+// Lots with a front on a street: industry, utilities, offices, shops, the port, the beach, farms
+async function buildSite(cell, g) {
+  const d = frontSide(cell), f = frameFor([cell], d), { P, F, A } = f, back = [-F[0], -F[1]], flat = flatFor(g);
+  const ext = f.ext(0.5), extBack = parcels.get(cell).ext[(d + 2) % 4];
+  const M = ASSETS, mat = assetMaterial;
+  switch (cell.id) {
+    case 'factory': {
+      const name = pick(['industry-factory', 'industry-factory-hall', 'industry-factory-old', 'industry-building']);
+      await put(name, P(0.5, 0.52), F, { building: true, g, fit: 0.62 });
+      await put(pick(['truck', 'forklift', 'dumpster']), P(0.15, 0.12), A, { g });
+      if (rand() < 0.5) await put('industry-storage', P(0.88, 0.75), F, { g, fit: 0.3 });
+      break;
+    }
+    case 'warehouse': case 'food-distribution': {
+      await put('industry-warehouse', P(0.5, 0.6), F, { building: true, g, fit: cell.id === 'warehouse' ? 0.6 : 0.8 });
+      const n = cell.id === 'warehouse' ? 2 : 4;
+      for (let k = 0; k < n; k++) await put(cell.id === 'warehouse' ? pick(['truck', 'forklift']) : 'truck', P(0.15 + k * (0.7 / Math.max(1, n - 1)), 0.13), back, { g });
+      break;
+    }
+    case 'power-station':
+      generation.push(cell);
+      await put('nuclear-power-plant', P(0.33, 0.55), F, { building: true, g, fit: 0.55 });
+      await put('cooling-tower', P(0.78, 0.62), F, { g, fit: 0.36 });
+      await put('chimney-big', P(0.62, 0.25), F, { g, s: 1.6 });
+      fenceRect(g, P, 0.03, 0.05, 0.97, 0.97);
+      break;
+    case 'gas-plant':
+      asset(M.gasPlant(mat), P(0.5, 0.5), F, { g });
+      fenceRect(g, P, 0.03, 0.05, 0.97, 0.97);
+      break;
+    case 'fuel-terminal':
+      asset(M.fuelTanks(mat), P(0.5, 0.55), F, { g });
+      for (const s of [0.18, 0.4]) await put('car-truck-tanker', P(s, 0.1), A, { g });
+      fenceRect(g, P, 0.03, 0.04, 0.97, 0.97);
+      break;
+    case 'freight-yard': {
+      asset(M.railTrack(mat, 1.0, 3), P(0.5, 0.62), F, { g, y: LOT_Y });
+      for (const [s, dz] of [[0.3, 0.52], [0.62, 0.62], [0.45, 0.72]]) await put('freight-train', P(s, dz), A, { g, fit: 0.3 });
+      for (let k = 0; k < 6; k++) await put(pick(CONTAINERS), P(0.12 + (k % 3) * 0.1, 0.2 + Math.floor(k / 3) * 0.12), A, { g, fit: 0.2 });
+      await put('forklift', P(0.5, 0.25), A, { g });
+      await put('industry-building', P(0.85, 0.2), F, { g, fit: 0.22, building: true });
+      break;
+    }
+    case 'data-centre': {
+      await put('data-center', P(0.5, 0.5), F, { building: true, g, fit: 0.66 });
+      for (const s of [0.2, 0.32]) await put('industry-storage', P(s, 0.88), A, { g, fit: 0.1 });
+      fenceRect(g, P, 0.05, 0.08, 0.95, 0.96);
+      break;
+    }
+    case 'sewage-works': case 'water-treatment':
+      asset(M.treatmentWorks(mat, cell.id === 'sewage-works' ? 'sewage' : 'water'), P(0.5, 0.52), F, { g });
+      fenceRect(g, P, 0.03, 0.04, 0.97, 0.97);
+      break;
+    case 'substation':
+      asset(M.substation(mat), P(0.5, 0.48), F, { g });
+      fenceRect(g, P, 0.16, 0.2, 0.84, 0.76);
+      break;
+    case 'water-tower':
+      asset(M.waterTower(mat), P(0.5, 0.5), F, { g });
+      fenceRect(g, P, 0.3, 0.3, 0.7, 0.7);
+      for (let k = 0; k < 3; k++) await put(pick(TREES), P(0.1 + rand() * 0.8, 0.8 + rand() * 0.15), F, { g, s: 0.85, turn: rand() * 6.28 });
+      break;
+    case 'pumping-station':
+      asset(M.pumpingStation(mat), P(0.42, 0.45), F, { g });
+      fenceRect(g, P, 0.15, 0.2, 0.85, 0.7);
+      break;
+    case 'supermarket':
+      asset(M.supermarket(mat), P(0.5, 0.76), F, { g });
+      await bays(f, 0.06, 0.94, 0.26, back, 0.5);
+      await bays(f, 0.06, 0.94, 0.5, F, 0.5);
+      break;
+    case 'petrol':
+      asset(M.petrolStation(mat), P(0.5, 0.5), F, { g });
+      for (const s of [0.42, 0.58]) if (rand() < 0.6) await put(pick(CARS.slice(0, 5)), P(s, 0.38 + rand() * 0.15), A, { g, y: Y.path });
+      break;
+    case 'exchange': {
+      const b = await put('building-block-5floor', P(0.5, 0.4), F, { building: true, g, fit: 0.5 });
+      asset(M.mobileTower(mat, 0.35), P(0.42, 0.45), F, { g, y: topOf(b) });
+      asset(M.dish(mat, 0.035), P(0.6, 0.35), F, { g, y: topOf(b) });
+      await put('industry-storage', P(0.85, 0.85), A, { g, fit: 0.12 });
+      break;
+    }
+    case 'studio': {
+      const b = await put('building-office-balcony', P(0.45, 0.45), F, { building: true, g, fit: 0.5 });
+      asset(M.dish(mat, 0.06), P(0.38, 0.5), F, { g, y: topOf(b) });
+      asset(M.mobileTower(mat, 0.3), P(0.55, 0.42), F, { g, y: topOf(b) });
+      for (const s of [0.78, 0.86]) asset(M.dish(mat, 0.05), P(s, 0.8), F, { g });
+      break;
+    }
+    case 'energy-office': case 'payments-office': {
+      // Local offices: the energy market operator's control room, and the payment systems centre
+      const name = cell.id === 'energy-office' ? 'building-office-rounded' : 'building-office';
+      await put(name, P(0.5, 0.5), F, { building: true, g, fit: 0.55 });
+      flat.polygon(warpRing([P(0.15, -ext - 0.02), P(0.85, -ext - 0.02), P(0.85, 0.18), P(0.15, 0.18)]), Y.path, SW.plinthWarm, [SURF.slabs, 1, 0]);
+      for (const s of [0.2, 0.8]) await put('lamp-city', P(s, 0.1), F, { g });
+      if (cell.id === 'payments-office') { await put('atm-mechine', P(0.3, 0.17), F, { g }); await put('armored-truck', P(0.85, 0.85), A, { g }); }
+      else asset(M.dish(mat, 0.04), P(0.5, 0.9), F, { g });
+      break;
+    }
+    case 'station': {
+      await put('building-train-station', P(0.5, 0.5), F, { building: true, g, fit: 0.85 });
+      asset(M.railTrack(mat, 1.0, 1), P(0.5, 0.88), F, { g });
+      await put('freight-train', P(0.35, 0.88), A, { g, fit: 0.3 });
+      asset(M.canopy(mat, 0.5, 0.09, 0.09), P(0.5, 0.15), F, { g });
+      for (const s of [0.3, 0.68]) await put('bus-passenger', P(s, 0.08), A, { g, y: Y.path });
+      break;
+    }
+    case 'port': {
+      // The quay runs to the water; cranes reach out over a ship alongside
+      await put('building-port-sea', P(0.25, 0.32), F, { building: true, g, fit: 0.42 });
+      for (const s of [0.45, 0.75]) asset(M.portCrane(mat), P(s, 0.85 + extBack), back, { g });
+      await put('ship-cargo', P(0.55, 1 + extBack + 0.3), A, { g, fit: 1.2, y: 0 });
+      for (let k = 0; k < 8; k++) await put(pick(CONTAINERS), P(0.5 + (k % 4) * 0.1, 0.3 + Math.floor(k / 4) * 0.12), A, { g, fit: 0.2 });
+      await put('forklift', P(0.4, 0.55), A, { g });
+      await put('truck', P(0.15, 0.6), F, { g });
+      break;
+    }
+    case 'beach': {
+      // A surf club kiosk by the road, then palms and umbrellas down to the water
+      await put('building-cafe', P(0.5, 0.15), F, { building: true, g, fit: 0.26 });
+      for (let k = 0; k < 4; k++) await put(pick(['palm', 'palm-round']), P(0.08 + rand() * 0.84, 0.3 + rand() * 0.2), F, { g, s: 0.9, turn: rand() * 6.28 });
+      const colours = [ASSETS.PAL.red, ASSETS.PAL.yellow, ASSETS.PAL.orange, ASSETS.PAL.white];
+      for (let k = 0; k < 6; k++) asset(M.umbrella(mat, pick(colours)), P(0.08 + rand() * 0.84, 0.6 + rand() * (0.35 + extBack)), F, { g });
+      break;
+    }
+    case 'farm': {
+      const house = pick(['building-house-family-large', 'building-cabin-big', 'building-house-family-small']);
+      await put(house, P(0.28, 0.32), F, { building: true, g });
+      asset(M.farmBuildings(mat), P(0.72, 0.62), F, { g });
+      flat.polygon(warpRing([P(0.5, 0.35), P(0.95, 0.35), P(0.95, 0.92), P(0.5, 0.92)]), Y.path, SW.dirt, PLAIN);
+      clearPath(flat, P(0.55, -ext - 0.02), P(0.55, 0.4), 0.06, Y.path, SW.dirt);
+      await put(pick(['jeep-open', 'truck']), P(0.62, 0.42), A, { g, y: Y.path });
+      fenceRect(g, P, 0.03, 0.55, 0.45, 0.97, 'wood');
+      break;
+    }
+    case 'airfield': {
+      // A grass strip with a short runway, a hangar, a control tower and aircraft
+      strip(flat, P(0.02, 0.6), P(0.98, 0.6), 0.16, Y.path, SW.runway, SURF.asphalt);
+      for (let s = 0.1; s < 0.92; s += 0.12) strip(flat, P(s, 0.6), P(s + 0.06, 0.6), 0.01, Y.path + 0.0004, SW.white);
+      await put('plane-passenger', P(0.62, 0.6), A, { g, fit: 0.38, y: Y.path });
+      asset(M.hangar(mat), P(0.2, 0.24), F, { g });
+      await put('control-tower', P(0.85, 0.22), F, { g });
+      await put('helicopter', P(0.48, 0.25), A, { g, fit: 0.2 });
+      break;
+    }
+  }
+}
+// Country cells with no street front: wind turbines, solar farms, the reservoir, the transmitter
+async function buildCountry(cell, g) {
+  const C = centreOf(cell), flat = flatFor(g), M = ASSETS, mat = assetMaterial;
+  const at = (dx, dz) => [C[0] + dx, C[1] + dz];
+  switch (cell.id) {
+    case 'wind':
+      generation.push(cell);
+      flat.polygon(warpRing(cellPlan(cell, 0.01)), Y.land, SW.pasture, GRASS);
+      asset(M.windTurbine(mat, rand() * 2), at((rand() - 0.5) * 0.3, (rand() - 0.5) * 0.3), [0.6, -0.8], { g, y: 0 });
+      break;
+    case 'solar':
+      generation.push(cell);
+      flat.polygon(warpRing(cellPlan(cell, 0.04)), Y.land, SW.gravel, PLAIN);
+      asset(M.solarArray(mat), C, [0, -1], { g, y: Y.land });
+      fenceRect(g, (s, dd) => [C[0] - 0.5 + s, C[1] - 0.5 + dd], 0.04, 0.04, 0.96, 0.96);
+      break;
+    case 'reservoir': {
+      // A lake behind a dam wall on its south side, with trees round the shore
+      const ring = Array.from({ length: 28 }, (_, k) => { const a = (k / 28) * Math.PI * 2, r = 0.36 + 0.05 * Math.sin(a * 3 + cell.x); return [C[0] + Math.cos(a) * r, C[1] - 0.04 + Math.sin(a) * r * 0.9]; });
+      flat.polygon(ring.map(warp), Y.land, SW.water, PLAIN);
+      asset(M.damWall(mat, 0.62), at(0, 0.33), [0, 1], { g, y: 0 });
+      for (let k = 0; k < 6; k++) { const a = rand() * Math.PI * 2; await place(pick(TREES.concat(CONIFERS)), warp(at(Math.cos(a) * 0.46, Math.sin(a) * 0.44 - 0.04)), { y: 0, s: 0.85, rot: rand() * 6.28, parent: g }); }
+      break;
+    }
+    case 'transmitter':
+      asset(M.transmitterMast(mat), C, [0, 1], { g, y: 0 });
+      fenceRect(g, (s, dd) => [C[0] - 0.5 + s, C[1] - 0.5 + dd], 0.3, 0.3, 0.7, 0.7);
+      break;
+  }
+}
+// A cell's square on the plan, shrunk by `inset`
+const cellPlan = (cell, inset = 0) => { const [x, z] = centreOf(cell), h = 0.5 - inset; return [[x - h, z - h], [x + h, z - h], [x + h, z + h], [x - h, z + h]]; };
 
 // Lots laid out one cell at a time
 async function buildCell(cell, g) {
@@ -897,6 +1151,15 @@ async function buildCell(cell, g) {
       if (rand() < 0.7) await put(pick(TREES), P(driveFirst ? 0.8 : 0.2, -ext * 0.4), F, { s: 0.8, turn: rand() * 6.28, g });
       break;
     }
+    case 'factory': case 'warehouse': case 'power-station': case 'gas-plant': case 'fuel-terminal': case 'freight-yard':
+    case 'food-distribution': case 'data-centre': case 'sewage-works': case 'water-treatment': case 'substation': case 'water-tower':
+    case 'pumping-station': case 'supermarket': case 'petrol': case 'exchange': case 'studio': case 'energy-office':
+    case 'payments-office': case 'station': case 'port': case 'beach': case 'farm': case 'airfield':
+      await buildSite(cell, g);
+      break;
+    case 'wind': case 'solar': case 'reservoir': case 'transmitter':
+      await buildCountry(cell, g);
+      break;
     case 'garden':
       await scatter(g, fr, 3, TREES, { y: LOT_Y });
       await place(pick(['grill-round', 'dryer-outside', 'sand-box']), lotPoint(fr, [0, 1], (rand() - 0.5) * 0.4, (rand() - 0.5) * 0.4), { y: LOT_Y, rot: rand() * 6.28, parent: g });
@@ -949,10 +1212,165 @@ async function buildCell(cell, g) {
       }
   }
 }
+// Fields: up to six field cells side by side are one farm's paddock, sown with one crop in rows
+// that run one way, with hedgerows round it
+{
+  const regionOf = new Map(), crops = [[SW.wheat, SW.dirt], [SW.crop, SW.pasture], [SW.ploughed, SW.dirt], [SW.pasture, null]];
+  let regions = 0;
+  for (const cell of plan.cells) {
+    if (cell.id !== 'field' || regionOf.has(cell)) continue;
+    const region = [cell], id = regions++;
+    regionOf.set(cell, id);
+    for (let q = 0; q < region.length && region.length < 6; q++) for (const [dx, dz] of DIRS) {
+      const k = cellAt(region[q].x + dx, region[q].z + dz);
+      if (k?.id === 'field' && !regionOf.has(k) && region.length < 6) { regionOf.set(k, id); region.push(k); }
+    }
+    const [sown, rows] = pick(crops), alongX = rand() < 0.5;
+    for (const k of region) {
+      const g = groups.get(k), flat = flatFor(g), [x, z] = centreOf(k);
+      flat.polygon(warpRing(cellPlan(k, 0.01)), Y.land, sown, GRASS);
+      if (rows) for (let i = 1; i < 13; i++) {
+        const o = -0.49 + i * 0.075;
+        const [a, b] = alongX ? [[x - 0.49, z + o], [x + 0.49, z + o]] : [[x + o, z - 0.49], [x + o, z + 0.49]];
+        strip(flat, a, b, 0.02, Y.land + 0.0003, rows);
+      }
+    }
+  }
+  // Hedgerows along the edges of each paddock, but not along the sea
+  const done = new Set();
+  for (const [k, id] of regionOf) {
+    const [x, z] = centreOf(k);
+    DIRS.forEach(([dx, dz], d) => {
+      const n = cellAt(k.x + dx, k.z + dz);
+      if (n?.kind === 'sea' || regionOf.get(n) === id) return;
+      const key = [k.x, k.z, n?.x, n?.z].join(','), back = [n?.x, n?.z, k.x, k.z].join(',');
+      if (done.has(back)) return;
+      done.add(key);
+      const ex = x + dx * 0.49, ez = z + dz * 0.49;
+      fence(groups.get(k), 'hedge', [ex - dz * 0.5, ez - dx * 0.5], [ex + dz * 0.5, ez + dx * 0.5]);
+    });
+  }
+}
 for (const run of runs) await (run.id === 'houses' ? houseRun : run.id === 'townhouses' ? townhouseRun : shopRun)(run);
 for (const [cell, g] of groups) if (!inRun.has(cell)) await buildCell(cell, g);
 for (const [g, flat] of flats) g.add(flat.mesh());
 for (const [g, segs] of fenceSegs) buildFences(g, segs);
+
+// ---------------------------------------------------------------- the power network
+// Lines run from the power station and the wind and solar farms to every zone substation: a
+// tree of shortest routes on the plan, which prefers to follow streets and cross fields rather
+// than lots. Along streets they hang from wooden poles in the verge; across country, from pylons.
+{
+  const idx = (k) => k.z * N + k.x;
+  const costOf = (k) => (!k || k.kind === 'sea' || k.kind === 'square' ? Infinity : k.kind === 'road' || k.kind === 'main' ? 1 : k.kind === 'green' ? 1.6 : k.id === 'substation' ? 1 : 8);
+  const tree = new Set(generation.map(idx)), remaining = new Set(plan.cells.filter((k) => k.id === 'substation').map(idx));
+  const paths = [];
+  while (tree.size && remaining.size) {
+    const dist = new Float64Array(N * N).fill(Infinity), prev = new Int32Array(N * N).fill(-1), done = new Uint8Array(N * N);
+    const open = [...tree];
+    open.forEach((i) => { dist[i] = 0; });
+    let hit = -1;
+    while (hit < 0) {
+      let u = -1, best = Infinity;
+      for (const i of open) if (!done[i] && dist[i] < best) { best = dist[i]; u = i; }
+      if (u < 0) break;
+      done[u] = 1;
+      if (remaining.has(u)) { hit = u; break; }
+      const ux = u % N, uz = Math.floor(u / N);
+      for (const [dx, dz] of DIRS) {
+        const k = cellAt(ux + dx, uz + dz), cst = costOf(k);
+        if (!isFinite(cst)) continue;
+        const j = idx(k);
+        if (dist[u] + cst < dist[j]) { if (!isFinite(dist[j])) open.push(j); dist[j] = dist[u] + cst; prev[j] = u; }
+      }
+    }
+    if (hit < 0) break;
+    const path = [];
+    for (let i = hit; i >= 0; i = tree.has(i) ? -1 : prev[i]) path.unshift(i);
+    path.forEach((i) => tree.add(i));
+    remaining.delete(hit);
+    paths.push(path);
+  }
+  // One pole per cell on a route: in a street's verge, always on the right of the way the line
+  // runs, so it stays on one side of the street; or in the middle of a field
+  const poles = new Map(), wires = [];
+  const POLE_SIDE = 0.37;
+  function poleAt(path, n) {
+    const i = path[n];
+    if (poles.has(i)) return poles.get(i);
+    const k = plan.cells[i], C = centreOf(k), street = k.kind === 'road' || k.kind === 'main';
+    let p = C;
+    if (street) {
+      const a = centreOf(plan.cells[path[Math.max(0, n - 1)]]), b = centreOf(plan.cells[path[Math.min(path.length - 1, n + 1)]]);
+      const d = norm(sub(b, a)), right = [-d[1], d[0]];
+      const s = roadSides(k), straight = s.length === 2 && (s[1] - s[0]) === 2;
+      // On a straight street, beside it; at a corner or junction, on the corner
+      p = straight ? [C[0] + right[0] * POLE_SIDE, C[1] + right[1] * POLE_SIDE]
+        : [C[0] + Math.sign(right[0] + d[0] * 0.01 || 1) * POLE_SIDE, C[1] + Math.sign(right[1] + d[1] * 0.01 || 1) * POLE_SIDE];
+    }
+    const pole = { p, wood: street, dirs: [] };
+    poles.set(i, pole);
+    return pole;
+  }
+  for (const path of paths) for (let n = 0; n < path.length - 1; n++) {
+    const a = poleAt(path, n), b = poleAt(path, n + 1);
+    const d = norm(sub(b.p, a.p));
+    a.dirs.push(d); b.dirs.push(d);
+    wires.push([a, b]);
+  }
+  const PYLON = [[-0.17, 0.43], [0, 0.47], [0.17, 0.43]];
+  for (const [i, pole] of poles) {
+    const d = norm(pole.dirs.reduce((s, v) => [s[0] + v[0], s[1] + v[1]], [0, 0])), across = [d[1], -d[0]];
+    pole.across = Math.hypot(...d) ? across : [1, 0];
+    const g = groups.get(plan.cells[i]) ?? city;
+    if (pole.wood) asset(ASSETS.woodPole(assetMaterial), pole.p, [-pole.across[1], pole.across[0]], { g, y: 0 });
+    else await place('power_line_pole', warp(pole.p), { rot: facing([-pole.across[1], pole.across[0]]) + Math.PI / 2, y: 0, parent: g });
+    pole.attach = (pole.wood ? ASSETS.WOOD_POLE_WIRES : PYLON).map(([o, h]) => {
+      const q = warp([pole.p[0] + pole.across[0] * o, pole.p[1] + pole.across[1] * o]);
+      return new THREE.Vector3(q[0], h, q[1]);
+    });
+  }
+  // Wires, sagging between poles
+  const pos = [];
+  for (const [a, b] of wires) for (let w = 0; w < 3; w++) {
+    const A = a.attach[w], B = b.attach[w], sag = 0.05 * A.distanceTo(B);
+    let last = A;
+    for (let s = 1; s <= 6; s++) {
+      const t = s / 6, P = A.clone().lerp(B, t);
+      P.y -= sag * 4 * t * (1 - t);
+      pos.push(last.x, last.y, last.z, P.x, P.y, P.z);
+      last = P;
+    }
+  }
+  const lines = new THREE.BufferGeometry();
+  lines.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  city.add(new THREE.LineSegments(lines, new THREE.LineBasicMaterial({ color: 0x2b2a30 })));
+}
+
+// ---------------------------------------------------------------- phone masts
+// One about every 200 m, on whichever nearby lot has room: a car park, a yard, a field
+{
+  const room = new Set(['car-park', 'factory', 'warehouse', 'field', 'woods', 'park', 'supermarket', 'farm', 'water-treatment', 'sewage-works', 'freight-yard', 'station', 'petrol', 'school', 'hospital', 'data-centre', 'fire-station']);
+  for (let gz = 3; gz < N; gz += 6) for (let gx = 3; gx < N; gx += 6) {
+    let best = null, bd = Infinity;
+    for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) {
+      const k = cellAt(gx + dx, gz + dz);
+      if (k && room.has(k.id) && Math.hypot(dx, dz) < bd) { bd = Math.hypot(dx, dz); best = k; }
+    }
+    if (!best) continue;
+    const C = centreOf(best);
+    asset(ASSETS.mobileTower(assetMaterial), [C[0] + 0.36, C[1] - 0.36], [0, 1], { g: groups.get(best), y: LOT_Y });
+  }
+}
+
+// ---------------------------------------------------------------- boats
+{
+  const sea = plan.cells.filter((k) => k.kind === 'sea' && k.z - waterline(k.x - c) - c > 1.5 && k.z - waterline(k.x - c) - c < 5);
+  for (let i = 0; i < Math.min(9, sea.length); i++) {
+    const k = pick(sea), C = centreOf(k);
+    await place(pick(['boat-sail', 'boat-sail', 'boat-fishing', 'ship-yacht']), warp([C[0] + rand() - 0.5, C[1] + rand() - 0.5]), { rot: rand() * 6.28, y: 0, fit: 0.22 });
+  }
+}
 
 // ---------------------------------------------------------------- street trees
 // In the front gardens along residential streets, clear of driveways and paths, and not in
@@ -974,7 +1392,10 @@ for (const [g, segs] of fenceSegs) buildFences(g, segs);
 // ---------------------------------------------------------------- the plan as a little map
 const COLOURS = {
   R: '#55535c', M: '#2b2a30', c: '#e8744f', a: '#c98a7a', u: '#d9b38c', h: '#eadbb0', P: '#8d8b94', y: '#9cc46a',
-  p: '#5fae4a', t: '#2f6e3a', q: '#7cc35e', Q: '#45c2d6', T: '#f5c451', B: '#f5c451', S: '#f5c451', X: '#f5c451', O: '#f5c451', H: '#f5c451', D: '#f5c451',
+  p: '#5fae4a', t: '#2f6e3a', q: '#7cc35e', Q: '#45c2d6', T: '#f5c451', B: '#f5c451', S: '#f5c451', X: '#f5c451', O: '#f5c451', H: '#f5c451',
+  '~': '#2e5f8a', s: '#f2e0b8', K: '#8fa8e8', U: '#ef9a6a', g: '#ef9a6a', L: '#8fa8e8', N: '#8fa8e8', J: '#8fa8e8', I: '#8fa8e8', C: '#8fa8e8',
+  v: '#8fa8e8', k: '#8fa8e8', e: '#8fa8e8', i: '#a7a3b8', W: '#a7a3b8', E: '#8fa8e8', G: '#8fa8e8', F: '#8fa8e8', Y: '#8fa8e8', d: '#8fa8e8',
+  D: '#8fa8e8', Z: '#8fa8e8', f: '#c9b46a', b: '#b5763f', n: '#e4feff', o: '#3a4a78', r: '#35a9c9', V: '#8fa8e8', x: '#8fa8e8', A: '#8fa8e8',
 };
 // Draws the cells decided up to `upTo` (all of them by default), with a dark tick on each lot's front
 function drawMap(canvas, upTo = Infinity) {
@@ -1105,10 +1526,13 @@ if (LIVE) {
     drawMap(mapCanvas);
     await post(await png(mapCanvas), 'town-map');
     await post(`${plan.map}\n\nseed ${SEED}, solved in ${plan.tries} tries\n${LEGEND}\n`, 'town-map.txt');
-    await shot(new THREE.Vector3(0, 0, 0), N * 0.6, 'town-whole');
-    await shot(new THREE.Vector3(0, 0, 0), 4.6, 'town-square');
-    await shot(new THREE.Vector3(N * 0.22, 0, N * 0.22), 5, 'town-neighbourhood');
-    await shot(new THREE.Vector3(-2.5, 0, 1.5), 2, 'town-closeup');
+    const near = (id) => { const k = plan.cells.find((q) => q.id === id); const [x, z] = warp(centreOf(k)); return new THREE.Vector3(x, 0, z); };
+    await shot(new THREE.Vector3(0, 0, 1), N * 0.6, 'town-whole');
+    await shot(new THREE.Vector3(0, 0, 0), 5, 'town-square');
+    await shot(near('power-station'), 4.5, 'town-industry');
+    await shot(near('port'), 3.5, 'town-port');
+    await shot(near('wind'), 4.5, 'town-country');
+    await shot(near('supermarket'), 1.8, 'town-closeup');
   }
 }
 document.title = 'done';
