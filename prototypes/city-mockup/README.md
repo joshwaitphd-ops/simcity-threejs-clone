@@ -15,6 +15,9 @@ These are throwaway pages that render city ideas with the game's own models, pal
 | `city.html` | City v1: a 32×32 town built from a text map |
 | `city2.html` | City v2: several buildings per lot, less downtown parking, Chinatown, strip malls with parking in front |
 | `organic.html` | The city without a grid, built from real Santa Fe streets, building footprints, parks and river (`osm/santafe.json`) |
+| `town.html` | A town made by Wave Function Collapse instead of from real data: a fresh town for every `?seed=`. See **Procedural town** below |
+| `lib/townPlan.js` | The town planner behind `town.html`: the WFC solver and its module catalogue. No three.js, so it runs in Node too |
+| `lib/look.js` | Ground and building textures, shared by `organic.html` and `town.html` |
 | `ground/` | Detail textures for the ground in `organic.html`: `grass.jpg` is Grass 23 from Screaming Brain Studios' Tiny Texture Pack 1. From Poly Haven: `pavers.jpg` is Square Concrete Pavers and `asphalt.jpg` is Asphalt 02. All CC0, reduced to 512 px |
 | `buildings/` | Detail textures for buildings in `organic.html`, all from Poly Haven: `brick.jpg` (Large Red Bricks), `plaster.jpg` (White Plaster 02), `roof-flat.jpg` (Tarred Gravel) and `roof-tiles.jpg` (Grey Roof Tiles 02). All CC0, reduced to 512 px |
 | `maps/` | The text maps behind v1 and v2. One character per tile, with the legend at the bottom |
@@ -31,11 +34,54 @@ These are throwaway pages that render city ideas with the game's own models, pal
 npm run prototype
 ```
 
-Then open http://127.0.0.1:3001/organic.html?live for the Santa Fe city, or http://127.0.0.1:3001/city2.html?live for the grid city. Drag to pan, right-drag to rotate, scroll to zoom.
+Then open http://127.0.0.1:3001/town.html?live for a procedural town, http://127.0.0.1:3001/organic.html?live for the Santa Fe city, or http://127.0.0.1:3001/city2.html?live for the grid city. Drag to pan, right-drag to rotate, scroll to zoom.
 
 Add `&ground=flat`, `&ground=procedural` or `&ground=textures` (the default) to switch how the ground is drawn, and `&buildings=flat` to turn off the building textures. See **Ground and building detail** below.
 
 The Santa Fe city runs the 3-minute day/night cycle. The slider at the bottom sets the time of day, and its button pauses the clock. The slider is a demo feature only: remove the parts marked `DEMO` in `organic.html` when it's no longer needed.
+
+## Procedural town
+
+**Status: parked, 22 November 2026.** This is #7 Procedural town on the Notion dev log. Where it stopped:
+
+- Done: zones (core, residential, industrial, rural), the coast and port, every critical infrastructure site from the zones review, power lines and phone masts.
+- Rough edges: wind turbines are scattered rather than grouped into a farm; a few solar cells sit alone in corners; some fields fall inside the industrial zone; the airfield is squeezed into one cell.
+- Not yet: the game in `src/` still uses the old grid. Nothing here is wired into it.
+
+`town.html` makes a coastal town from a seed, with Wave Function Collapse (WFC), ideas taken from [wass08/wfc-magic-school](https://github.com/wass08/wfc-magic-school). It's built around the kit, so nothing has to be squeezed onto plots that don't fit it. The map is 35 × 35 cells of 32 m, about 1.1 km across.
+
+**Zones** come first, from the seed: a commercial core round the courthouse square, residential rings, an industrial wedge running down to the coast, farmland round the edge, and the sea along one side with a wandering coastline. Every module is weighted by zone.
+
+**The plan** (`lib/townPlan.js`). Every module (a street, a lot, a field, the sea) has a socket on each side, and two cells can sit side by side only if their sockets fit: a lot's front must face a street, a lot's back can't, streets never run side by side without joining, and only a beach or a port's quay faces the sea. On top of plain WFC:
+
+- **Fixed constraints:** the square, its ring road, an outer loop road whose south side is the esplanade, main streets out to the edge and down to the esplanade, and the sea are placed first.
+- **Weights by zone, affinity** (like attracts like), **spacing** (junctions, substations, supermarkets, petrol stations and water towers keep apart), a **soft size cap** on parks and farms, and **one of each landmark**.
+- **No 2×2 patch of road**, enforced during propagation.
+- **Required buildings:** every critical infrastructure site must appear. One the solver left out is put in by changing a filler lot with the same sockets, in the right zone.
+- **Stranded streets** that don't reach the main roads are joined where they run beside one, or cleared and the patch solved again without streets ("modifying in blocks", as in wfc-magic-school).
+- Domains are bitsets, so a town takes about 0.05–0.2 s to plan.
+
+**Critical infrastructure**, by zone (map letters in brackets):
+
+| Zone | Buildings |
+|---|---|
+| Commercial | shops, supermarkets (U), petrol stations (g), telephone exchange (L), broadcast studio (N), energy market operator and payment systems as local offices (J, I), station and bus depot (C), bank, town hall, police |
+| Residential | houses, townhouses, flats, water towers (v), pumping station (k), zone substations (e), school, hospital, fire station |
+| Industrial | factories, warehouses, power station (E), gas plant (G), fuel terminal (F), freight yard (Y), food distribution (d), data centre (D), sewage works (Z), the port (K) |
+| Rural | fields, farms, wind turbines (n), solar farm (o), reservoir (r), water treatment (V), transmitter mast (x), airfield (A), woods |
+| Coast | beaches with a surf club (s), the port, boats |
+
+The kit's models are used where it has them. What it lacks (wind turbines, solar arrays, substations, phone masts, the transmitter mast, water tower, pumping station, treatment works, fuel tanks, gas spheres, petrol station, supermarket, farm buildings, port cranes, rail track, hangar, poles, dam) is built from simple shapes in `lib/assets.js`, coloured from the kit's palette so it takes the same textures and lighting.
+
+**Networks:** power lines run from the power station and the wind and solar farms to every substation, on the shortest routes that follow streets: wooden poles along streets, pylons across fields. A phone mast stands about every 200 m.
+
+**Drawing it.** A gentle warp bends the grid. Streets are traced from junction to junction and drawn as textured ribbons with rounded bends and junctions. Lots lie flat and reach the pavement, laid out along each street: houses with driveways, paths and fenced gardens; shops in one row with car parks behind. Fields are sown in rows, a paddock at a time, with hedgerows. The sea's edge is smoothed so it never cuts into land, with shallows and a strip of sand.
+
+**In the browser** (`?live`): a minimap of the plan, **Watch it build**, **New town**, and the day/night cycle. `?size=` changes the grid (odd numbers); `?ground=`, `?buildings=` and `?texscale=` work as in `organic.html`; `?debug` logs street and path checks; without `?live`, `?shot=x,z,half` renders one view.
+
+To try the planner without a browser: `node -e "import('./lib/townPlan.js').then(({ planTown }) => console.log(planTown({ seed: 5 }).map))"`
+
+Renders: `renders/town-seed1-{whole,square,industry,port,country,closeup}.jpg`, `renders/town-seed{2,3}-whole.jpg`, and `renders/town-seed1-map.png` for the plan.
 
 ## Ground and building detail
 
@@ -80,7 +126,7 @@ python3 tools/sheet_server.py . out 5 600 &      # expect 5 images, give up afte
   http://127.0.0.1:8765/city2.html
 ```
 
-The number of images each page posts: `contact-sheet` 5, `roads` 1, `mock` 4, `mock2` 4, `city` 5, `city2` 5, `organic` 5. Add `?ground=…` or `?buildings=flat` to the URL to render one style. Stop Chrome once the server prints `done`.
+The number of images each page posts: `contact-sheet` 5, `roads` 1, `mock` 4, `mock2` 4, `city` 5, `city2` 5, `organic` 5, `town` 8 (with its map, as `town-map.txt` and `town-map.png`). Add `?ground=…` or `?buildings=flat` to the URL to render one style. Stop Chrome once the server prints `done`.
 
 ## What we learnt
 
